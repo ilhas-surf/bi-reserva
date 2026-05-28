@@ -1,0 +1,19 @@
+{
+  "name": "bi-sienge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "BI local da SPE 01 a partir da API do Sienge",
+  "scripts": {
+    "fetch": "node src/fetch.js",
+    "build": "node src/build.js",
+    "update": "node src/fetch.js && node src/build.js && node src/open.js",
+    "serve": "node src/serve.js",
+    "encrypt": "node src/encrypt.js",
+    "publish": "node src/fetch.js && node src/build.js && node src/encrypt.js",
+    "open": "node src/open.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2"
+  }
+}

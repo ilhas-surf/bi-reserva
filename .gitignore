@@ -1,0 +1,7 @@
+node_modules/
+.env
+dashboard.html
+public/
+# dados crus do Sienge NUNCA vao pro git; so o manual.json (orcado/avanco fisico) persiste
+data/*
+!data/manual.json

@@ -1,0 +1,54 @@
+name: Atualiza BI Reserva
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 09:00 UTC = 06:00 BRT, todo dia
+  workflow_dispatch:        # permite rodar manualmente pelo botao "Run workflow"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Buscar Sienge, gerar dashboard e criptografar
+        env:
+          SIENGE_SUBDOMAIN: ${{ secrets.SIENGE_SUBDOMAIN }}
+          SIENGE_API_USER: ${{ secrets.SIENGE_API_USER }}
+          SIENGE_API_PASSWORD: ${{ secrets.SIENGE_API_PASSWORD }}
+          SPE_COMPANY_ID: ${{ secrets.SPE_COMPANY_ID }}
+          BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
+        run: |
+          node src/fetch.js
+          node src/build.js
+          node src/encrypt.js
+
+      - name: Preparar artefato do Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Publicar no GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

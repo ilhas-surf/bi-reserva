@@ -1,0 +1,26 @@
+{
+  "_instrucoes": "Preencha aqui os dados que NAO vem do Sienge. Datas no formato AAAA-MM. Depois rode: npm run build",
+  "obraNome": "Reserva - SPE 01",
+  "avancoFisico": [
+    {
+      "mes": "2025-01",
+      "planejado": 5,
+      "real": 4
+    },
+    {
+      "mes": "2025-02",
+      "planejado": 12,
+      "real": 10
+    }
+  ],
+  "orcadoMensalCusto": [
+    {
+      "mes": "2025-01",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-02",
+      "orcado": 0
+    }
+  ]
+}
