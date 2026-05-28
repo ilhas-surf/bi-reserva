@@ -1,16 +1,126 @@
 {
-  "_instrucoes": "Preencha aqui os dados que NAO vem do Sienge. Datas no formato AAAA-MM. Depois rode: npm run build",
+  "_instrucoes": "Dados que NAO vem do Sienge. Preencha e faca commit; o painel atualiza no proximo build (ou rode Actions > Run workflow). avancoFisico: % acumulado planejado e real (curva S). orcadoMensalCusto: meta de custo do mes em R$.",
   "obraNome": "Reserva - SPE 01",
   "avancoFisico": [
     {
       "mes": "2025-01",
-      "planejado": 5,
-      "real": 4
+      "planejado": 0,
+      "real": 0
     },
     {
       "mes": "2025-02",
-      "planejado": 12,
-      "real": 10
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-03",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-04",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-05",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-06",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-07",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-08",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-09",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-10",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-11",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2025-12",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-01",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-02",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-03",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-04",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-05",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-06",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-07",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-08",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-09",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-10",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-11",
+      "planejado": 0,
+      "real": 0
+    },
+    {
+      "mes": "2026-12",
+      "planejado": 0,
+      "real": 0
     }
   ],
   "orcadoMensalCusto": [
@@ -20,6 +130,94 @@
     },
     {
       "mes": "2025-02",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-03",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-04",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-05",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-06",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-07",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-08",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-09",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-10",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-11",
+      "orcado": 0
+    },
+    {
+      "mes": "2025-12",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-01",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-02",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-03",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-04",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-05",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-06",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-07",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-08",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-09",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-10",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-11",
+      "orcado": 0
+    },
+    {
+      "mes": "2026-12",
       "orcado": 0
     }
   ]
