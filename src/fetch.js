@@ -9,6 +9,7 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const COMPANY_ID = Number(process.env.SPE_COMPANY_ID || 3); // empresa transacional da SPE 01
+const BUILDING_ID = Number(process.env.SPE_BUILDING_ID || 3); // obra "Residencial Reserva" (buildingId 3)
 
 // Janela de datas (ultimos N meses ate hoje) para endpoints que exigem.
 function dateWindow(months = 48) {
@@ -83,7 +84,23 @@ async function main() {
     return r;
   }));
 
-  save('_summary', { generatedAt: new Date().toISOString(), subdomain: SUBDOMAIN, companyId: COMPANY_ID, window: dates, steps: summary });
+  // ---- SPE 01: Suprimentos — contratos de fornecimento (obra Reserva) ----
+  summary.push(await step('supply_contracts (obra 3)', async () => {
+    const all = await getAll('/supply-contracts/all', {}, { maxPages: 30 });
+    const r = all.filter((c) => (c.buildings || []).some((b) => b.buildingId === BUILDING_ID));
+    save('supply_contracts', r);
+    return r;
+  }));
+
+  // ---- SPE 01: Suprimentos — medicoes (realizado dos contratos) ----
+  summary.push(await step('supply_measurements (obra 3)', async () => {
+    const all = await getAll('/supply-contracts/measurements/all', {}, { maxPages: 30 });
+    const r = all.filter((m) => m.buildingId === BUILDING_ID);
+    save('supply_measurements', r);
+    return r;
+  }));
+
+  save('_summary', { generatedAt: new Date().toISOString(), subdomain: SUBDOMAIN, companyId: COMPANY_ID, buildingId: BUILDING_ID, window: dates, steps: summary });
 
   console.log('\n== Resumo ==');
   for (const s of summary) console.log(`${s.ok ? 'OK ' : '-- '} ${s.label.padEnd(26)} ${s.ok ? s.count : s.error}`);

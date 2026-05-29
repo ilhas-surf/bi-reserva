@@ -18,6 +18,8 @@ const receivables = read('receivable_bills.json');
 const payables = read('payable_bills.json');
 const creditors = read('creditors.json');
 const customers = read('customers.json');
+const supplyContracts = read('supply_contracts.json');
+const supplyMeasurements = read('supply_measurements.json');
 const summary = read('_summary.json', {});
 
 // ---------- Entrada manual (orcado / avanco fisico) ----------
@@ -121,6 +123,65 @@ const topCredores = Object.entries(porCredor)
   .sort((a, b) => b[1] - a[1]).slice(0, 12)
   .map(([id, v]) => ({ nome: creditorName[id] || ('Credor ' + id), valor: v }));
 
+// ---------- SUPRIMENTOS (contratos de fornecimento + medicoes) ----------
+// Join: contrato documentId|contractNumber|supplierId  <->  medicao documentId|contractNumber|contractSupplierId
+const measKey = (m) => `${m.documentId}|${m.contractNumber}|${m.contractSupplierId}`;
+const realizadoPorContrato = {};
+for (const m of supplyMeasurements) {
+  const k = measKey(m);
+  realizadoPorContrato[k] = (realizadoPorContrato[k] || 0) + num(m.netValue);
+}
+const isRescindido = (s) => /RESCIND/i.test(s || '');
+const contratosSup = supplyContracts.map((c) => {
+  const k = `${c.documentId}|${c.contractNumber}|${c.supplierId}`;
+  const total = num(c.totalLaborValue) + num(c.totalMaterialValue);
+  const realizado = realizadoPorContrato[k] || 0;
+  const rescindido = isRescindido(c.status);
+  const aRealizar = rescindido ? 0 : Math.max(total - realizado, 0);
+  return {
+    doc: `${c.documentId} ${c.contractNumber}`,
+    fornecedor: c.supplierName || ('Fornecedor ' + c.supplierId),
+    objeto: (c.object || '').trim(),
+    status: c.status || '',
+    rescindido,
+    contratado: total,
+    realizado,
+    aRealizar,
+    pct: total ? 100 * realizado / total : 0,
+    data: c.contractDate,
+  };
+}).sort((a, b) => b.contratado - a.contratado);
+
+const supTotalContratado = contratosSup.reduce((s, c) => s + c.contratado, 0);
+const supTotalRealizado = contratosSup.reduce((s, c) => s + c.realizado, 0);
+const supTotalARealizar = contratosSup.reduce((s, c) => s + c.aRealizar, 0);
+const supContratadoAtivo = contratosSup.filter((c) => !c.rescindido).reduce((s, c) => s + c.contratado, 0);
+const supPctExec = supContratadoAtivo ? 100 * supTotalRealizado / supContratadoAtivo : 0;
+const supQtdRescindidos = contratosSup.filter((c) => c.rescindido).length;
+
+// Agregado por fornecedor
+const supPorForn = {};
+for (const c of contratosSup) {
+  const f = (supPorForn[c.fornecedor] ||= { fornecedor: c.fornecedor, contratos: 0, contratado: 0, realizado: 0, aRealizar: 0 });
+  f.contratos++; f.contratado += c.contratado; f.realizado += c.realizado; f.aRealizar += c.aRealizar;
+}
+const fornecedoresSup = Object.values(supPorForn)
+  .map((f) => ({ ...f, pct: f.contratado ? 100 * f.realizado / f.contratado : 0 }))
+  .sort((a, b) => b.contratado - a.contratado);
+
+// Cronograma de obra: contratado (curva por data do contrato) x realizado/medido (por data da medicao), acumulados
+const contratadoMes = byMonth(supplyContracts.map((c) => ({
+  contractDate: c.contractDate, v: num(c.totalLaborValue) + num(c.totalMaterialValue),
+})), 'contractDate', 'v');
+const medidoMes = byMonth(supplyMeasurements, 'measurementDate', 'netValue');
+const mesesCron = sortedMonths(Object.keys(contratadoMes), Object.keys(medidoMes));
+let accC = 0, accM = 0;
+const cronContratadoAcum = [], cronMedidoAcum = [];
+for (const m of mesesCron) {
+  accC += contratadoMes[m] || 0; cronContratadoAcum.push(accC);
+  accM += medidoMes[m] || 0; cronMedidoAcum.push(accM);
+}
+
 // ---------- ORCADO x REALIZADO (custo) ----------
 const orcMap = {};
 for (const o of (manual.orcadoMensalCusto || [])) orcMap[o.mes] = num(o.orcado);
@@ -155,6 +216,22 @@ const payload = {
     vgvMes: mesesVendas.map((m) => contratosPorMes[m] || 0),
   },
   topCredores,
+  suprimentos: {
+    totalContratado: supTotalContratado,
+    totalRealizado: supTotalRealizado,
+    totalARealizar: supTotalARealizar,
+    pctExec: supPctExec,
+    qtdContratos: contratosSup.length,
+    qtdRescindidos: supQtdRescindidos,
+    qtdFornecedores: fornecedoresSup.length,
+    contratos: contratosSup,
+    fornecedores: fornecedoresSup,
+  },
+  cronograma: {
+    meses: mesesCron,
+    contratadoAcum: cronContratadoAcum,
+    medidoAcum: cronMedidoAcum,
+  },
   avancoFisico: {
     meses: af.map((x) => x.mes),
     planejado: af.map((x) => num(x.planejado)),
@@ -170,6 +247,7 @@ console.log('Dashboard gerado: dashboard.html');
 console.log(`  Vendas: ${ativos.length} contratos | VGV ${fmtBRL(vgv)}`);
 console.log(`  Recebiveis: ${fmtBRL(recTotal)} (recebido ${fmtBRL(recebido)}, inadimpl. ${fmtBRL(inadimplencia)})`);
 console.log(`  Custos (a pagar): ${payablesOk.length} titulos | ${fmtBRL(custoTotal)}`);
+console.log(`  Suprimentos: ${contratosSup.length} contratos (${supQtdRescindidos} rescindidos) | contratado ${fmtBRL(supTotalContratado)} · realizado ${fmtBRL(supTotalRealizado)} · a realizar ${fmtBRL(supTotalARealizar)}`);
 if (anomalias.length) {
   console.log(`  ! ${anomalias.length} titulo(s) anomalo(s) excluido(s) (> VGV):`);
   for (const a of anomalias) console.log(`    - #${a.id} ${fmtBRL(a.valor)} ${a.credor} "${a.nota}"`);
@@ -222,13 +300,15 @@ td.r,th.r{text-align:right}
   <section class="tab" data-tab="orcado"></section>
   <section class="tab" data-tab="vendas"></section>
   <section class="tab" data-tab="financeiro"></section>
+  <section class="tab" data-tab="suprimentos"></section>
+  <section class="tab" data-tab="cronograma"></section>
   <section class="tab" data-tab="fisico"></section>
 </main>
 <script>
 const D=${J};
 const BRL=v=>(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL',maximumFractionDigits:0});
 const PCT=v=>(v||0).toFixed(1)+'%';
-const tabs=[['geral','Visão geral'],['orcado','Orçado × Realizado'],['vendas','Vendas'],['financeiro','Financeiro'],['fisico','Avanço físico']];
+const tabs=[['geral','Visão geral'],['orcado','Orçado × Realizado'],['vendas','Vendas'],['financeiro','Financeiro'],['suprimentos','Suprimentos'],['cronograma','Cronograma de obra'],['fisico','Avanço físico']];
 const nav=document.getElementById('nav');
 tabs.forEach(([id,label],i)=>{const b=document.createElement('button');b.textContent=label;if(i===0)b.className='active';b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelector('.tab[data-tab="'+id+'"]').classList.add('active');};nav.appendChild(b);});
 
@@ -269,6 +349,32 @@ document.querySelector('[data-tab="financeiro"]').innerHTML='<div class="grid">'
  '<div class="chartbox"><h3>Top fornecedores (por valor a pagar)</h3><table><thead><tr><th>Fornecedor</th><th class="r">Valor</th></tr></thead><tbody>'+
  D.topCredores.map(c=>'<tr><td>'+c.nome+'</td><td class="r">'+BRL(c.valor)+'</td></tr>').join('')+'</tbody></table></div>';
 
+// SUPRIMENTOS
+const sup=D.suprimentos;
+const statusLabel={PARTIALLY_MEASURED:'Em medição',COMPLETED:'Concluído',FULLY_MEASURED:'Medido 100%',PENDING:'Pendente',RESCINDED:'Rescindido'};
+const stLbl=s=>statusLabel[s]||s||'—';
+document.querySelector('[data-tab="suprimentos"]').innerHTML='<div class="grid">'+
+ kpi('Total contratado',BRL(sup.totalContratado),sup.qtdContratos+' contratos'+(sup.qtdRescindidos?' · '+sup.qtdRescindidos+' rescindidos':''),'blue')+
+ kpi('Realizado (medido)',BRL(sup.totalRealizado),PCT(sup.pctExec)+' executado','green')+
+ kpi('A realizar (saldo)',BRL(sup.totalARealizar),'exclui rescindidos','yel')+
+ kpi('Fornecedores',sup.qtdFornecedores,null)+
+ '</div>'+
+ box('Contratado × Realizado × A realizar (por contrato — top 15)','cSupBar')+
+ '<div class="chartbox"><h3>Contratos de fornecimento ('+sup.contratos.length+')</h3><div style="overflow:auto;max-height:520px"><table><thead><tr><th>Contrato</th><th>Fornecedor</th><th>Status</th><th class="r">Contratado</th><th class="r">Realizado</th><th class="r">A realizar</th><th class="r">%</th></tr></thead><tbody>'+
+ sup.contratos.map(c=>'<tr'+(c.rescindido?' style="opacity:.45"':'')+'><td>'+c.doc+'</td><td title="'+(c.objeto||'').replace(/"/g,'&quot;')+'">'+c.fornecedor+'</td><td>'+stLbl(c.status)+'</td><td class="r">'+BRL(c.contratado)+'</td><td class="r">'+BRL(c.realizado)+'</td><td class="r">'+BRL(c.aRealizar)+'</td><td class="r">'+PCT(c.pct)+'</td></tr>').join('')+
+ '</tbody></table></div></div>'+
+ '<div class="chartbox"><h3>Por fornecedor ('+sup.fornecedores.length+')</h3><div style="overflow:auto;max-height:520px"><table><thead><tr><th>Fornecedor</th><th class="r">Contratos</th><th class="r">Contratado</th><th class="r">Realizado</th><th class="r">A realizar</th><th class="r">%</th></tr></thead><tbody>'+
+ sup.fornecedores.map(f=>'<tr><td>'+f.fornecedor+'</td><td class="r">'+f.contratos+'</td><td class="r">'+BRL(f.contratado)+'</td><td class="r">'+BRL(f.realizado)+'</td><td class="r">'+BRL(f.aRealizar)+'</td><td class="r">'+PCT(f.pct)+'</td></tr>').join('')+
+ '</tbody></table></div></div>';
+
+// CRONOGRAMA
+const temCron=D.cronograma.meses.length>0;
+document.querySelector('[data-tab="cronograma"]').innerHTML=(temCron?
+ box('Cronograma físico-financeiro: Contratado × Realizado (acumulado)','cCron')+
+ '<div class="note">Curva de <b>contratado</b> = soma acumulada dos contratos de fornecimento por data de assinatura. Curva de <b>realizado</b> = soma acumulada das medições por data. Fonte: Suprimentos do Sienge (obra Reserva).</div>'
+ :'<div class="note">Sem dados de suprimentos para montar o cronograma.</div>')+
+ (D.avancoFisico.meses.length?box('Avanço físico %: Planejado × Real','cCronAF'):'');
+
 // FISICO
 const temAF=D.avancoFisico.meses.length>0;
 document.querySelector('[data-tab="fisico"]').innerHTML= temAF? box('Avanço físico: Planejado × Real (curva S)','cAF') :
@@ -284,6 +390,11 @@ mk('cOrc',{type:'bar',data:{labels:D.fin.meses,datasets:[{label:'Orçado',data:D
 mk('cVgv',{type:'bar',data:{labels:D.vendas.meses,datasets:[{label:'VGV',data:D.vendas.vgvMes,backgroundColor:'#3fb95088'}]},options:{plugins:{tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 mk('cUnid',{type:'doughnut',data:{labels:['Vendidas','Reservadas','Disponíveis'],datasets:[{data:[k.unidVendidas,k.unidReservadas,k.unidDisponiveis],backgroundColor:['#3fb950','#d29922','#2a3441']}]}});
 mk('cFluxo',{data:{labels:D.fin.meses,datasets:[ds('Entradas',D.fin.receita,'#3fb950'),ds('Saídas',D.fin.custo,'#f85149')]},options:{plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
+// Suprimentos: barras por contrato (top 15 por contratado)
+const supTop=sup.contratos.slice(0,15);
+mk('cSupBar',{type:'bar',data:{labels:supTop.map(c=>c.fornecedor.length>22?c.fornecedor.slice(0,22)+'…':c.fornecedor),datasets:[{label:'Realizado',data:supTop.map(c=>c.realizado),backgroundColor:'#3fb950cc'},{label:'A realizar',data:supTop.map(c=>c.aRealizar),backgroundColor:'#d29922aa'}]},options:{indexAxis:'y',scales:{x:{stacked:true},y:{stacked:true}},plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.x)}}}}});
+if(temCron)mk('cCron',{data:{labels:D.cronograma.meses,datasets:[ds('Contratado (acum.)',D.cronograma.contratadoAcum,'#58a6ff'),ds('Realizado/medido (acum.)',D.cronograma.medidoAcum,'#3fb950')]},options:{plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
+if(D.avancoFisico.meses.length)mk('cCronAF',{data:{labels:D.avancoFisico.meses,datasets:[ds('Planejado',D.avancoFisico.planejado,'#58a6ff'),ds('Real',D.avancoFisico.real,'#3fb950')]},options:{scales:{y:{ticks:{callback:v=>v+'%'},max:100}},plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+PCT(c.parsed.y)}}}}});
 if(temAF)mk('cAF',{data:{labels:D.avancoFisico.meses,datasets:[ds('Planejado',D.avancoFisico.planejado,'#58a6ff'),ds('Real',D.avancoFisico.real,'#3fb950')]},options:{scales:{y:{ticks:{callback:v=>v+'%'},max:100}},plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+PCT(c.parsed.y)}}}}});
 </script>
 </body></html>`;
