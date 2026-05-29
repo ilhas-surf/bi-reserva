@@ -37,7 +37,18 @@ jobs:
       - name: Instalar dependencias
         run: npm ci
 
-      - name: Buscar Sienge, gerar dashboard e criptografar
+      # Cache da classificacao de titulos (categoria de pagamento por bill id).
+      # A categoria e imutavel -> so os titulos novos sao buscados a cada run.
+      # key sempre nova (run_id) p/ salvar sempre; restore-keys traz a mais recente.
+      - name: Cache classificacao de titulos
+        uses: actions/cache@v4
+        with:
+          path: data/bill_categories.json
+          key: bill-categories-${{ github.run_id }}
+          restore-keys: |
+            bill-categories-
+
+      - name: Buscar Sienge, classificar, gerar dashboard e criptografar
         env:
           SIENGE_SUBDOMAIN: ${{ secrets.SIENGE_SUBDOMAIN }}
           SIENGE_API_USER: ${{ secrets.SIENGE_API_USER }}
@@ -46,6 +57,7 @@ jobs:
           BI_PASSWORD: ${{ secrets.BI_PASSWORD }}
         run: |
           node src/fetch.js
+          node src/classify_bills.js
           node src/build.js
           node src/encrypt.js
 

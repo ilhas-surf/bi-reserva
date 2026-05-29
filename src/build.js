@@ -20,6 +20,7 @@ const creditors = read('creditors.json');
 const customers = read('customers.json');
 const supplyContracts = read('supply_contracts.json');
 const supplyMeasurements = read('supply_measurements.json');
+const billCategories = read('bill_categories.json', {}); // { billId: paymentCategoryId } via /bills/{id}/budget-categories
 const summary = read('_summary.json', {});
 
 // ---------- Entrada manual (orcado / avanco fisico) ----------
@@ -35,15 +36,7 @@ if (!fs.existsSync(MANUAL_FILE)) {
     orcadoMensalCusto: [
       { mes: '2025-01', orcado: 0 },
       { mes: '2025-02', orcado: 0 }
-    ],
-    viabilidade: {
-      _ajuda: 'Premissas da viabilidade que NAO vem do Sienge. Deixe 0/vazio para usar a estimativa automatica.',
-      vgvEstoque: 0,        // R$ do estoque a vender; 0 = estima por preco/m2 dos vendidos
-      deducoesPct: 0,       // % sobre o VGV (impostos sobre venda + comissao) p/ VGV liquido
-      custoTotalOrcado: 0,  // custo total orcado da obra (terreno+obra+despesas); 0 = usa lancado+suprimentos+terreno+despesas
-      custoTerreno: 0,      // usado so quando custoTotalOrcado=0
-      outrasDespesas: 0     // usado so quando custoTotalOrcado=0
-    }
+    ]
   };
   fs.writeFileSync(MANUAL_FILE, JSON.stringify(template, null, 2));
   console.log('Criado data/manual.json (modelo). Preencha avanco fisico e orcado e rode build de novo.');
@@ -138,6 +131,23 @@ const topCredores = Object.entries(porCredor)
   .sort((a, b) => b[1] - a[1]).slice(0, 12)
   .map(([id, v]) => ({ nome: creditorName[id] || ('Credor ' + id), valor: v }));
 
+// ---------- CUSTO REAL x CAPITAL (classificacao por categoria de pagamento) ----------
+// Cada titulo tem uma categoria (bill_categories.json, do /bills/{id}/budget-categories).
+// Movimentacoes de capital (emprestimos/aportes/socios/mutuo) NAO sao custo real do
+// empreendimento -> excluidas da margem. Provisoes (doc PRV) tambem (nao sao caixa).
+const CAP_RE = /^(104|105|231|222|290|19202|29001|20303|2030304|2030305|2030307|2030216|2270107|2050110|2050111|2050112)/;
+const isCapital = (b) => CAP_RE.test(String(billCategories[b.id] || ''));
+const isProvisao = (b) => (b.documentIdentificationId || '').trim() === 'PRV';
+let custoReal = 0, custoCapital = 0, custoProvisao = 0, semCategoria = 0;
+for (const b of payablesOk) {
+  const v = num(b.totalInvoiceAmount);
+  if (isProvisao(b)) { custoProvisao += v; continue; }
+  if (isCapital(b)) { custoCapital += v; continue; }
+  if (!billCategories[b.id]) semCategoria += v;
+  custoReal += v;
+}
+const classificados = Object.keys(billCategories).length;
+
 // ---------- SUPRIMENTOS (contratos de fornecimento + medicoes) ----------
 // Join: contrato documentId|contractNumber|supplierId  <->  medicao documentId|contractNumber|contractSupplierId
 const measKey = (m) => `${m.documentId}|${m.contractNumber}|${m.contractSupplierId}`;
@@ -204,37 +214,29 @@ for (const o of (manual.orcadoMensalCusto || [])) orcMap[o.mes] = num(o.orcado);
 // ---------- AVANCO FISICO ----------
 const af = manual.avancoFisico || [];
 
-// ---------- VIABILIDADE (indicadores) ----------
-// VGV vendido (carteira) vem da API. VGV de estoque a API nao traz preco -> estima por
-// preco/m2 medio dos vendidos, ou usa valor manual (viabilidade.vgvEstoque) se preenchido.
-// VGV liquido = VGV - deducoes (impostos+comissao, % manual). Margem = resultado / VGV liquido,
-// com custo total = orcado manual (viabilidade.custoTotalOrcado) ou, na falta, custo lancado + suprimentos a realizar.
-const viab = manual.viabilidade || {};
+// ---------- VIABILIDADE (indicadores) — 100% Sienge, sem entrada manual ----------
+// VGV vendido = soma dos contratos ativos (API). VGV estoque = soma do "Valor Atual" das
+// unidades Disponiveis, que vem no campo indexedQuantity do /units (validado contra o
+// relatorio "Unidades por Empreendimento (Estoque)" do Comercial: bate exatamente).
+// Sem comissao (retida no ato pelo corretor, fora do caixa da SPE) e sem deducao manual.
+// Custo = custo REAL (contas a pagar excl. capital/provisao) + suprimentos a realizar (compromisso).
 const vgvVendido = vgv;
-const precoM2 = areaStk.V ? vgvVendido / areaStk.V : 0;
-const vgvEstoqueEstimado = precoM2 * areaStk.D;
-const vgvEstoqueManual = num(viab.vgvEstoque);
-const vgvEstoque = vgvEstoqueManual > 0 ? vgvEstoqueManual : vgvEstoqueEstimado;
-const vgvEstoqueFonte = vgvEstoqueManual > 0 ? 'manual' : 'estimado';
-const vgvTotal = vgvVendido + vgvEstoque;
-const deducoesPct = num(viab.deducoesPct);            // % sobre o VGV (impostos sobre venda + comissao)
-const deducoesValor = vgvTotal * deducoesPct / 100;
-const vgvLiquido = vgvTotal - deducoesValor;
-const vgvVendidoLiquido = vgvVendido * (1 - deducoesPct / 100);
-// custo total da viabilidade
-const custoTotalOrcado = num(viab.custoTotalOrcado);
-const custoTerreno = num(viab.custoTerreno);
-const outrasDespesas = num(viab.outrasDespesas);
-// custo lancado (obra) ja temos em custoTotal (payables). Suprimentos a realizar = compromisso futuro.
-// custo estimado p/ conclusao = custo lancado + saldo a realizar de suprimentos (+ terreno/despesas manuais)
-const custoProjetado = custoTotalOrcado > 0
-  ? custoTotalOrcado
-  : (custoTotal + (typeof supTotalARealizar === 'number' ? supTotalARealizar : 0) + custoTerreno + outrasDespesas);
-const custoProjetadoFonte = custoTotalOrcado > 0 ? 'orcado' : 'estimado';
-const resultado = vgvLiquido - custoProjetado;
-const margemPct = vgvLiquido ? 100 * resultado / vgvLiquido : 0;
-const exposicaoCaixa = custoTotal - recebido; // quanto ja saiu menos quanto ja entrou
-const temViab = !!(viab.vgvEstoque || viab.deducoesPct || viab.custoTotalOrcado);
+let vgvEstoque = 0, vgvPermuta = 0, vgvMutuo = 0, vgvReservaTec = 0;
+for (const u of units) {
+  const c = (u.commercialStock || '').toString().toUpperCase();
+  const val = num(u.indexedQuantity);
+  if (c === 'D') vgvEstoque += val;            // Disponivel = estoque a vender
+  else if (c === 'E') vgvPermuta += val;       // Permuta
+  else if (c === 'M') vgvMutuo += val;         // Mutuo
+  else if (c === 'R') vgvReservaTec += val;    // Reserva tecnica
+}
+const precoM2Estoque = areaStk.D ? vgvEstoque / areaStk.D : 0;
+const vgvTotal = vgvVendido + vgvEstoque;      // sellable = vendido + disponivel
+const custoSuprARealizar = (typeof supTotalARealizar === 'number' ? supTotalARealizar : 0);
+const custoProjetado = custoReal + custoSuprARealizar; // realizado real + comprometido (obra)
+const resultado = vgvTotal - custoProjetado;
+const margemPct = vgvTotal ? 100 * resultado / vgvTotal : 0;
+const exposicaoCaixa = custoReal - recebido;   // caixa real ja desembolsado menos recebido
 
 // ---------- Series para graficos ----------
 const mesesFin = sortedMonths(Object.keys(custoPorMes), Object.keys(recPorMes), Object.keys(orcMap));
@@ -280,21 +282,23 @@ const payload = {
     medidoAcum: cronMedidoAcum,
   },
   viabilidade: {
-    vgvVendido, vgvEstoque, vgvEstoqueFonte, vgvTotal,
-    precoM2, areaVendida: areaStk.V, areaEstoque: areaStk.D,
-    deducoesPct, deducoesValor, vgvLiquido, vgvVendidoLiquido,
-    custoLancado: custoTotal, custoSuprimentosARealizar: supTotalARealizar,
-    custoTerreno, outrasDespesas, custoProjetado, custoProjetadoFonte,
-    resultado, margemPct, exposicaoCaixa, temViab,
+    vgvVendido, vgvEstoque, vgvTotal,
+    vgvPermuta, vgvMutuo, vgvReservaTec,
+    precoM2Estoque, areaVendida: areaStk.V, areaEstoque: areaStk.D,
+    custoLancado: custoTotal, custoReal, custoCapital, custoProvisao,
+    custoSuprARealizar, custoProjetado,
+    resultado, margemPct, exposicaoCaixa,
+    classificados, semCategoria, qtdTitulos: payablesOk.length,
   },
   financeiro: {
     // carteira (vendido) — firme, da API
     carteiraTotal: recTotal, carteiraRecebido: recebido, carteiraAReceber: aReceber,
     carteiraInadimplencia: inadimplencia,
     // estoque (a vender) — potencial, nao e conta a receber ainda
-    estoqueVgv: vgvEstoque, estoqueUnid: unidDisponiveis, estoqueFonte: vgvEstoqueFonte,
-    // obra (custo lancado) — sem split pago/a-pagar (decisao do usuario)
-    obraLancado: custoTotal, obraTitulos: payablesOk.length,
+    estoqueVgv: vgvEstoque, estoqueUnid: unidDisponiveis,
+    // obra (custo) — lancado total e custo real (excl. capital/provisao)
+    obraLancado: custoTotal, obraReal: custoReal, obraCapital: custoCapital, obraProvisao: custoProvisao,
+    obraTitulos: payablesOk.length,
     suprContratado: supTotalContratado, suprRealizado: supTotalRealizado, suprARealizar: supTotalARealizar,
   },
   avancoFisico: {
@@ -313,7 +317,9 @@ console.log(`  Vendas: ${ativos.length} contratos | VGV ${fmtBRL(vgv)}`);
 console.log(`  Recebiveis: ${fmtBRL(recTotal)} (recebido ${fmtBRL(recebido)}, inadimpl. ${fmtBRL(inadimplencia)})`);
 console.log(`  Custos (a pagar): ${payablesOk.length} titulos | ${fmtBRL(custoTotal)}`);
 console.log(`  Suprimentos: ${contratosSup.length} contratos (${supQtdRescindidos} rescindidos) | contratado ${fmtBRL(supTotalContratado)} · realizado ${fmtBRL(supTotalRealizado)} · a realizar ${fmtBRL(supTotalARealizar)}`);
-console.log(`  Viabilidade: VGV total ${fmtBRL(vgvTotal)} (vendido ${fmtBRL(vgvVendido)} + estoque ${fmtBRL(vgvEstoque)} [${vgvEstoqueFonte}]) | margem ${margemPct.toFixed(1)}% [custo ${custoProjetadoFonte}]`);
+console.log(`  Viabilidade: VGV total ${fmtBRL(vgvTotal)} (vendido ${fmtBRL(vgvVendido)} + estoque ${fmtBRL(vgvEstoque)})`);
+console.log(`    Custo real ${fmtBRL(custoReal)} (excl. capital ${fmtBRL(custoCapital)} + provisao ${fmtBRL(custoProvisao)}) + suprim. a realizar ${fmtBRL(custoSuprARealizar)} = ${fmtBRL(custoProjetado)}`);
+console.log(`    Resultado ${fmtBRL(resultado)} | Margem ${margemPct.toFixed(1)}% | classificados ${classificados}/${payablesOk.length}`);
 if (anomalias.length) {
   console.log(`  ! ${anomalias.length} titulo(s) anomalo(s) excluido(s) (> VGV):`);
   for (const a of anomalias) console.log(`    - #${a.id} ${fmtBRL(a.valor)} ${a.credor} "${a.nota}"`);
@@ -397,34 +403,34 @@ document.querySelector('[data-tab="geral"]').innerHTML='<div class="grid">'+
  '</div>'+anomBox()+box('Receita × Custo por mês','cGeral')+
  (D.temManual?'':'<div class="note">💡 Preencha <b>data/manual.json</b> (orçado mensal e avanço físico) e rode <b>npm run build</b> para ativar as abas Orçado×Realizado e Avanço físico.</div>');
 
-// VIABILIDADE
+// VIABILIDADE — tudo da API Sienge
 const v=D.viabilidade;
-const fonteTag=f=>f==='manual'||f==='orcado'?'<span style="color:var(--ac)">'+(f==='manual'?'manual':'orçado')+'</span>':'<span style="color:var(--yel)">estimado</span>';
 document.querySelector('[data-tab="viabilidade"]').innerHTML=
  '<div class="grid">'+
- kpi('VGV total',BRL(v.vgvTotal),'vendido + estoque','green')+
- kpi('VGV líquido',BRL(v.vgvLiquido),v.deducoesPct?('após '+PCT(v.deducoesPct)+' de deduções'):'sem deduções (preencher)','blue')+
- kpi('VGV vendido (carteira)',BRL(v.vgvVendido),PCT(v.vgvTotal?100*v.vgvVendido/v.vgvTotal:0)+' do VGV')+
- kpi('VGV estoque (a vender)',BRL(v.vgvEstoque),v.areaEstoque.toFixed(0)+' m² · '+(v.vgvEstoqueFonte==='manual'?'manual':'estimado p/ m²'),'yel')+
- (v.custoProjetadoFonte==='orcado'
-   ? kpi('Resultado projetado',BRL(v.resultado),'VGV líq − custo orçado',v.resultado>=0?'green':'red')+
-     kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV líquido',v.margemPct>=0?'green':'red')
-   : kpi('Resultado projetado','—','preencha o custo orçado','mut')+
-     kpi('Margem de resultado','—','preencha o custo orçado','mut'))+
+ kpi('VGV total',BRL(v.vgvTotal),'vendido + estoque a vender','green')+
+ kpi('VGV vendido (carteira)',BRL(v.vgvVendido),PCT(v.vgvTotal?100*v.vgvVendido/v.vgvTotal:0)+' do VGV','blue')+
+ kpi('VGV estoque (a vender)',BRL(v.vgvEstoque),v.areaEstoque.toFixed(0)+' m² · '+BRL(v.precoM2Estoque)+'/m²','yel')+
+ kpi('Custo total',BRL(v.custoProjetado),'real + suprim. a realizar')+
+ kpi('Resultado projetado',BRL(v.resultado),'VGV − custo',v.resultado>=0?'green':'red')+
+ kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV',v.margemPct>=0?'green':'red')+
  '</div>'+
- '<div class="row2">'+box('Composição do VGV','cViabVgv')+(v.custoProjetadoFonte==='orcado'?box('VGV líquido × Custo × Resultado','cViabRes'):'')+'</div>'+
- '<div class="chartbox"><h3>Premissas e fontes</h3><table><tbody>'+
- '<tr><td>Preço médio / m² (vendidos)</td><td class="r">'+BRL(v.precoM2)+'/m²</td></tr>'+
- '<tr><td>Área vendida × estoque</td><td class="r">'+v.areaVendida.toFixed(0)+' m² · '+v.areaEstoque.toFixed(0)+' m²</td></tr>'+
- '<tr><td>VGV de estoque</td><td class="r">'+BRL(v.vgvEstoque)+' ('+fonteTag(v.vgvEstoqueFonte)+')</td></tr>'+
- '<tr><td>Deduções sobre venda (impostos+comissão)</td><td class="r">'+PCT(v.deducoesPct)+' = '+BRL(v.deducoesValor)+'</td></tr>'+
- '<tr><td>Custo lançado na obra (API)</td><td class="r">'+BRL(v.custoLancado)+'</td></tr>'+
- '<tr><td>Suprimentos a realizar (compromisso)</td><td class="r">'+BRL(v.custoSuprimentosARealizar)+'</td></tr>'+
- (v.custoTerreno?'<tr><td>Terreno (manual)</td><td class="r">'+BRL(v.custoTerreno)+'</td></tr>':'')+
- (v.outrasDespesas?'<tr><td>Outras despesas (manual)</td><td class="r">'+BRL(v.outrasDespesas)+'</td></tr>':'')+
- '<tr><td><b>Custo total considerado</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b> ('+fonteTag(v.custoProjetadoFonte)+')</td></tr>'+
+ '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV × Custo × Resultado','cViabRes')+'</div>'+
+ '<div class="chartbox"><h3>Composição do custo (Sienge)</h3><table><tbody>'+
+ '<tr><td>Custo lançado total (contas a pagar)</td><td class="r">'+BRL(v.custoLancado)+'</td></tr>'+
+ '<tr><td>(−) Movimentação de capital (empréstimo/aporte/sócios/mútuo)</td><td class="r red">−'+BRL(v.custoCapital)+'</td></tr>'+
+ '<tr><td>(−) Provisões (PRV, não-caixa)</td><td class="r red">−'+BRL(v.custoProvisao)+'</td></tr>'+
+ '<tr><td><b>Custo real incorrido</b></td><td class="r"><b>'+BRL(v.custoReal)+'</b></td></tr>'+
+ '<tr><td>(+) Suprimentos a realizar (compromisso de obra)</td><td class="r">+'+BRL(v.custoSuprARealizar)+'</td></tr>'+
+ '<tr><td><b>Custo total considerado na margem</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b></td></tr>'+
  '</tbody></table></div>'+
- (v.temViab?'':'<div class="note">💡 Os valores de <b>estoque</b>, <b>deduções</b> e <b>custo total orçado</b> são estimados. Para precisão, preencha o bloco <b>viabilidade</b> em <b>data/manual.json</b> (vgvEstoque, deducoesPct, custoTotalOrcado, custoTerreno, outrasDespesas) e rode o build.</div>');
+ '<div class="chartbox"><h3>Composição do VGV por situação (Comercial)</h3><table><tbody>'+
+ '<tr><td>Vendido</td><td class="r">'+BRL(v.vgvVendido)+'</td></tr>'+
+ '<tr><td>Estoque a vender (Disponível)</td><td class="r">'+BRL(v.vgvEstoque)+'</td></tr>'+
+ (v.vgvPermuta?'<tr><td>Permuta (fora do VGV de venda)</td><td class="r mut">'+BRL(v.vgvPermuta)+'</td></tr>':'')+
+ (v.vgvMutuo?'<tr><td>Mútuo (fora do VGV de venda)</td><td class="r mut">'+BRL(v.vgvMutuo)+'</td></tr>':'')+
+ (v.vgvReservaTec?'<tr><td>Reserva técnica (fora do VGV de venda)</td><td class="r mut">'+BRL(v.vgvReservaTec)+'</td></tr>':'')+
+ '</tbody></table></div>'+
+ '<div class="note">Tudo da API Sienge. VGV estoque = "Valor Atual" das unidades Disponíveis (campo do /units, confere com o relatório de Estoque do Comercial). Custo exclui capital (empréstimos/aportes/sócios/mútuo) e provisões — '+v.classificados+' títulos classificados por categoria de pagamento. Sem comissão (retida no ato pelo corretor).</div>';
 
 // ORCADO x REALIZADO
 document.querySelector('[data-tab="orcado"]').innerHTML=box('Custo: Orçado × Realizado (por mês)','cOrc')+
@@ -448,16 +454,16 @@ document.querySelector('[data-tab="financeiro"]').innerHTML=
  '</div>'+
  '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">A vender — Estoque (potencial, não é recebível ainda)</h3>'+
  '<div class="grid">'+
- kpi('VGV de estoque',BRL(fin.estoqueVgv),fin.estoqueUnid+' unidades · '+(fin.estoqueFonte==='manual'?'manual':'estimado'),'yel')+
+ kpi('VGV de estoque',BRL(fin.estoqueVgv),fin.estoqueUnid+' unidades disponíveis','yel')+
  kpi('Potencial total (carteira + estoque)',BRL(fin.carteiraAReceber+fin.estoqueVgv),'a receber + a vender')+
  '</div>'+
- '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Obra — Custos (contas lançadas)</h3>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Obra — Custos (contas a pagar)</h3>'+
  '<div class="grid">'+
- kpi('Custo lançado na obra',BRL(fin.obraLancado),fin.obraTitulos+' títulos a pagar','yel')+
- kpi('Suprimentos contratado',BRL(fin.suprContratado),'realizado '+BRL(fin.suprRealizado))+
- kpi('Suprimentos a realizar',BRL(fin.suprARealizar),'saldo dos contratos','blue')+
+ kpi('Custo real incorrido',BRL(fin.obraReal),'exclui capital e provisões','yel')+
+ kpi('Custo lançado total',BRL(fin.obraLancado),fin.obraTitulos+' títulos (inclui capital '+BRL(fin.obraCapital)+')')+
+ kpi('Suprimentos a realizar',BRL(fin.suprARealizar),'compromisso de obra','blue')+
  '</div>'+anomBox()+
- '<div class="note">Pago × a pagar não é separado (decisão atual): o Sienge só expõe o status de pagamento parcela a parcela. O valor acima é o total <b>lançado</b> na obra. Dá para ativar a separação depois.</div>'+
+ '<div class="note">Custo real exclui movimentação de capital (empréstimos/aportes/sócios/mútuo: '+BRL(fin.obraCapital)+') e provisões ('+BRL(fin.obraProvisao)+'), classificadas pela categoria de pagamento de cada título. Pago × a pagar não é separado.</div>'+
  box('Fluxo: Entradas × Saídas por mês','cFluxo')+
  '<div class="chartbox"><h3>Top fornecedores (por valor a pagar)</h3><table><thead><tr><th>Fornecedor</th><th class="r">Valor</th></tr></thead><tbody>'+
  D.topCredores.map(c=>'<tr><td>'+c.nome+'</td><td class="r">'+BRL(c.valor)+'</td></tr>').join('')+'</tbody></table></div>';
@@ -505,7 +511,7 @@ mk('cUnid',{type:'doughnut',data:{labels:['Vendidas','Reservadas','Disponíveis'
 mk('cFluxo',{data:{labels:D.fin.meses,datasets:[ds('Entradas',D.fin.receita,'#3fb950'),ds('Saídas',D.fin.custo,'#f85149')]},options:{plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
 // Viabilidade
 mk('cViabVgv',{type:'doughnut',data:{labels:['VGV vendido (carteira)','VGV estoque (a vender)'],datasets:[{data:[v.vgvVendido,v.vgvEstoque],backgroundColor:['#3fb950','#d29922']}]},options:{plugins:{tooltip:{callbacks:{label:c=>c.label+': '+BRL(c.parsed)}}}}});
-mk('cViabRes',{type:'bar',data:{labels:['VGV líquido','Custo total','Resultado'],datasets:[{data:[v.vgvLiquido,v.custoProjetado,v.resultado],backgroundColor:['#58a6ff','#f85149',v.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
+mk('cViabRes',{type:'bar',data:{labels:['VGV total','Custo total','Resultado'],datasets:[{data:[v.vgvTotal,v.custoProjetado,v.resultado],backgroundColor:['#58a6ff','#f85149',v.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 // Suprimentos: barras por contrato (top 15 por contratado)
 const supTop=sup.contratos.slice(0,15);
 mk('cSupBar',{type:'bar',data:{labels:supTop.map(c=>c.fornecedor.length>22?c.fornecedor.slice(0,22)+'…':c.fornecedor),datasets:[{label:'Realizado',data:supTop.map(c=>c.realizado),backgroundColor:'#3fb950cc'},{label:'A realizar',data:supTop.map(c=>c.aRealizar),backgroundColor:'#d29922aa'}]},options:{indexAxis:'y',scales:{x:{stacked:true},y:{stacked:true}},plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.x)}}}}});
