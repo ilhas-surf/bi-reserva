@@ -10,6 +10,11 @@ permissions:
   pages: write
   id-token: write
 
+# Opt-in antecipado ao Node 24 (forcado p/ todos a partir de 2026-06-02).
+# Testa agora se as actions @v4 rodam no runtime novo, antes da troca obrigatoria.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: pages
   cancel-in-progress: true
