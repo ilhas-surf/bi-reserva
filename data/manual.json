@@ -1,6 +1,14 @@
 {
-  "_instrucoes": "Dados que NAO vem do Sienge. Preencha e faca commit; o painel atualiza no proximo build (ou rode Actions > Run workflow). avancoFisico: % acumulado planejado e real (curva S). orcadoMensalCusto: meta de custo do mes em R$.",
+  "_instrucoes": "Dados que NAO vem do Sienge. Preencha e faca commit; o painel atualiza no proximo build (ou rode Actions > Run workflow). avancoFisico: % acumulado planejado e real (curva S). orcadoMensalCusto: meta de custo do mes em R$. viabilidade: premissas da viabilidade (deixe 0 p/ usar estimativa automatica).",
   "obraNome": "Reserva - SPE 01",
+  "viabilidade": {
+    "_ajuda": "Deixe 0 para usar a estimativa automatica. vgvEstoque: R$ do estoque a vender (0 = estima por preco/m2 dos vendidos). deducoesPct: % sobre o VGV (impostos+comissao) p/ VGV liquido. custoTotalOrcado: custo total orcado da obra em R$ (necessario p/ calcular Resultado e Margem). custoTerreno/outrasDespesas: usados so quando custoTotalOrcado=0.",
+    "vgvEstoque": 0,
+    "deducoesPct": 0,
+    "custoTotalOrcado": 0,
+    "custoTerreno": 0,
+    "outrasDespesas": 0
+  },
   "avancoFisico": [
     {
       "mes": "2025-01",

@@ -35,7 +35,15 @@ if (!fs.existsSync(MANUAL_FILE)) {
     orcadoMensalCusto: [
       { mes: '2025-01', orcado: 0 },
       { mes: '2025-02', orcado: 0 }
-    ]
+    ],
+    viabilidade: {
+      _ajuda: 'Premissas da viabilidade que NAO vem do Sienge. Deixe 0/vazio para usar a estimativa automatica.',
+      vgvEstoque: 0,        // R$ do estoque a vender; 0 = estima por preco/m2 dos vendidos
+      deducoesPct: 0,       // % sobre o VGV (impostos sobre venda + comissao) p/ VGV liquido
+      custoTotalOrcado: 0,  // custo total orcado da obra (terreno+obra+despesas); 0 = usa lancado+suprimentos+terreno+despesas
+      custoTerreno: 0,      // usado so quando custoTotalOrcado=0
+      outrasDespesas: 0     // usado so quando custoTotalOrcado=0
+    }
   };
   fs.writeFileSync(MANUAL_FILE, JSON.stringify(template, null, 2));
   console.log('Criado data/manual.json (modelo). Preencha avanco fisico e orcado e rode build de novo.');
@@ -87,6 +95,13 @@ let unidEstoque = unidDisponiveis;
 if (!unidTotal && ativos.length) { // fallback: conta unidades dos contratos
   const us = new Set();
   for (const c of ativos) for (const u of (c.salesContractUnits || [])) us.add(u.unitId ?? u.id);
+}
+
+// area privativa por commercialStock (para estimar preco/m2 e VGV de estoque)
+const areaStk = { V: 0, R: 0, D: 0, E: 0, M: 0 };
+for (const u of units) {
+  const c = (u.commercialStock || '').toString().toUpperCase();
+  if (c in areaStk) areaStk[c] += num(u.privateArea);
 }
 
 // ---------- RECEBIVEIS ----------
@@ -189,6 +204,38 @@ for (const o of (manual.orcadoMensalCusto || [])) orcMap[o.mes] = num(o.orcado);
 // ---------- AVANCO FISICO ----------
 const af = manual.avancoFisico || [];
 
+// ---------- VIABILIDADE (indicadores) ----------
+// VGV vendido (carteira) vem da API. VGV de estoque a API nao traz preco -> estima por
+// preco/m2 medio dos vendidos, ou usa valor manual (viabilidade.vgvEstoque) se preenchido.
+// VGV liquido = VGV - deducoes (impostos+comissao, % manual). Margem = resultado / VGV liquido,
+// com custo total = orcado manual (viabilidade.custoTotalOrcado) ou, na falta, custo lancado + suprimentos a realizar.
+const viab = manual.viabilidade || {};
+const vgvVendido = vgv;
+const precoM2 = areaStk.V ? vgvVendido / areaStk.V : 0;
+const vgvEstoqueEstimado = precoM2 * areaStk.D;
+const vgvEstoqueManual = num(viab.vgvEstoque);
+const vgvEstoque = vgvEstoqueManual > 0 ? vgvEstoqueManual : vgvEstoqueEstimado;
+const vgvEstoqueFonte = vgvEstoqueManual > 0 ? 'manual' : 'estimado';
+const vgvTotal = vgvVendido + vgvEstoque;
+const deducoesPct = num(viab.deducoesPct);            // % sobre o VGV (impostos sobre venda + comissao)
+const deducoesValor = vgvTotal * deducoesPct / 100;
+const vgvLiquido = vgvTotal - deducoesValor;
+const vgvVendidoLiquido = vgvVendido * (1 - deducoesPct / 100);
+// custo total da viabilidade
+const custoTotalOrcado = num(viab.custoTotalOrcado);
+const custoTerreno = num(viab.custoTerreno);
+const outrasDespesas = num(viab.outrasDespesas);
+// custo lancado (obra) ja temos em custoTotal (payables). Suprimentos a realizar = compromisso futuro.
+// custo estimado p/ conclusao = custo lancado + saldo a realizar de suprimentos (+ terreno/despesas manuais)
+const custoProjetado = custoTotalOrcado > 0
+  ? custoTotalOrcado
+  : (custoTotal + (typeof supTotalARealizar === 'number' ? supTotalARealizar : 0) + custoTerreno + outrasDespesas);
+const custoProjetadoFonte = custoTotalOrcado > 0 ? 'orcado' : 'estimado';
+const resultado = vgvLiquido - custoProjetado;
+const margemPct = vgvLiquido ? 100 * resultado / vgvLiquido : 0;
+const exposicaoCaixa = custoTotal - recebido; // quanto ja saiu menos quanto ja entrou
+const temViab = !!(viab.vgvEstoque || viab.deducoesPct || viab.custoTotalOrcado);
+
 // ---------- Series para graficos ----------
 const mesesFin = sortedMonths(Object.keys(custoPorMes), Object.keys(recPorMes), Object.keys(orcMap));
 const mesesVendas = sortedMonths(Object.keys(contratosPorMes));
@@ -232,6 +279,24 @@ const payload = {
     contratadoAcum: cronContratadoAcum,
     medidoAcum: cronMedidoAcum,
   },
+  viabilidade: {
+    vgvVendido, vgvEstoque, vgvEstoqueFonte, vgvTotal,
+    precoM2, areaVendida: areaStk.V, areaEstoque: areaStk.D,
+    deducoesPct, deducoesValor, vgvLiquido, vgvVendidoLiquido,
+    custoLancado: custoTotal, custoSuprimentosARealizar: supTotalARealizar,
+    custoTerreno, outrasDespesas, custoProjetado, custoProjetadoFonte,
+    resultado, margemPct, exposicaoCaixa, temViab,
+  },
+  financeiro: {
+    // carteira (vendido) — firme, da API
+    carteiraTotal: recTotal, carteiraRecebido: recebido, carteiraAReceber: aReceber,
+    carteiraInadimplencia: inadimplencia,
+    // estoque (a vender) — potencial, nao e conta a receber ainda
+    estoqueVgv: vgvEstoque, estoqueUnid: unidDisponiveis, estoqueFonte: vgvEstoqueFonte,
+    // obra (custo lancado) — sem split pago/a-pagar (decisao do usuario)
+    obraLancado: custoTotal, obraTitulos: payablesOk.length,
+    suprContratado: supTotalContratado, suprRealizado: supTotalRealizado, suprARealizar: supTotalARealizar,
+  },
   avancoFisico: {
     meses: af.map((x) => x.mes),
     planejado: af.map((x) => num(x.planejado)),
@@ -248,6 +313,7 @@ console.log(`  Vendas: ${ativos.length} contratos | VGV ${fmtBRL(vgv)}`);
 console.log(`  Recebiveis: ${fmtBRL(recTotal)} (recebido ${fmtBRL(recebido)}, inadimpl. ${fmtBRL(inadimplencia)})`);
 console.log(`  Custos (a pagar): ${payablesOk.length} titulos | ${fmtBRL(custoTotal)}`);
 console.log(`  Suprimentos: ${contratosSup.length} contratos (${supQtdRescindidos} rescindidos) | contratado ${fmtBRL(supTotalContratado)} · realizado ${fmtBRL(supTotalRealizado)} · a realizar ${fmtBRL(supTotalARealizar)}`);
+console.log(`  Viabilidade: VGV total ${fmtBRL(vgvTotal)} (vendido ${fmtBRL(vgvVendido)} + estoque ${fmtBRL(vgvEstoque)} [${vgvEstoqueFonte}]) | margem ${margemPct.toFixed(1)}% [custo ${custoProjetadoFonte}]`);
 if (anomalias.length) {
   console.log(`  ! ${anomalias.length} titulo(s) anomalo(s) excluido(s) (> VGV):`);
   for (const a of anomalias) console.log(`    - #${a.id} ${fmtBRL(a.valor)} ${a.credor} "${a.nota}"`);
@@ -278,7 +344,7 @@ nav button:hover{color:var(--txt)}
 .kpi .label{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 .kpi .val{font-size:26px;font-weight:700;margin-top:6px}
 .kpi .sub{color:var(--mut);font-size:12px;margin-top:4px}
-.green{color:var(--ac)}.blue{color:var(--ac2)}.red{color:var(--red)}.yel{color:var(--yel)}
+.green{color:var(--ac)}.blue{color:var(--ac2)}.red{color:var(--red)}.yel{color:var(--yel)}.mut{color:var(--mut)}
 .chartbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin-top:16px}
 .chartbox h3{font-size:14px;font-weight:600;margin-bottom:14px;color:var(--txt)}
 .chartbox canvas{max-height:340px}
@@ -297,6 +363,7 @@ td.r,th.r{text-align:right}
 <nav id="nav"></nav>
 <main>
   <section class="tab active" data-tab="geral"></section>
+  <section class="tab" data-tab="viabilidade"></section>
   <section class="tab" data-tab="orcado"></section>
   <section class="tab" data-tab="vendas"></section>
   <section class="tab" data-tab="financeiro"></section>
@@ -308,7 +375,7 @@ td.r,th.r{text-align:right}
 const D=${J};
 const BRL=v=>(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL',maximumFractionDigits:0});
 const PCT=v=>(v||0).toFixed(1)+'%';
-const tabs=[['geral','Visão geral'],['orcado','Orçado × Realizado'],['vendas','Vendas'],['financeiro','Financeiro'],['suprimentos','Suprimentos'],['cronograma','Cronograma de obra'],['fisico','Avanço físico']];
+const tabs=[['geral','Visão geral'],['viabilidade','Viabilidade'],['orcado','Orçado × Realizado'],['vendas','Vendas'],['financeiro','Financeiro'],['suprimentos','Suprimentos'],['cronograma','Cronograma de obra'],['fisico','Avanço físico']];
 const nav=document.getElementById('nav');
 tabs.forEach(([id,label],i)=>{const b=document.createElement('button');b.textContent=label;if(i===0)b.className='active';b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelector('.tab[data-tab="'+id+'"]').classList.add('active');};nav.appendChild(b);});
 
@@ -330,6 +397,35 @@ document.querySelector('[data-tab="geral"]').innerHTML='<div class="grid">'+
  '</div>'+anomBox()+box('Receita × Custo por mês','cGeral')+
  (D.temManual?'':'<div class="note">💡 Preencha <b>data/manual.json</b> (orçado mensal e avanço físico) e rode <b>npm run build</b> para ativar as abas Orçado×Realizado e Avanço físico.</div>');
 
+// VIABILIDADE
+const v=D.viabilidade;
+const fonteTag=f=>f==='manual'||f==='orcado'?'<span style="color:var(--ac)">'+(f==='manual'?'manual':'orçado')+'</span>':'<span style="color:var(--yel)">estimado</span>';
+document.querySelector('[data-tab="viabilidade"]').innerHTML=
+ '<div class="grid">'+
+ kpi('VGV total',BRL(v.vgvTotal),'vendido + estoque','green')+
+ kpi('VGV líquido',BRL(v.vgvLiquido),v.deducoesPct?('após '+PCT(v.deducoesPct)+' de deduções'):'sem deduções (preencher)','blue')+
+ kpi('VGV vendido (carteira)',BRL(v.vgvVendido),PCT(v.vgvTotal?100*v.vgvVendido/v.vgvTotal:0)+' do VGV')+
+ kpi('VGV estoque (a vender)',BRL(v.vgvEstoque),v.areaEstoque.toFixed(0)+' m² · '+(v.vgvEstoqueFonte==='manual'?'manual':'estimado p/ m²'),'yel')+
+ (v.custoProjetadoFonte==='orcado'
+   ? kpi('Resultado projetado',BRL(v.resultado),'VGV líq − custo orçado',v.resultado>=0?'green':'red')+
+     kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV líquido',v.margemPct>=0?'green':'red')
+   : kpi('Resultado projetado','—','preencha o custo orçado','mut')+
+     kpi('Margem de resultado','—','preencha o custo orçado','mut'))+
+ '</div>'+
+ '<div class="row2">'+box('Composição do VGV','cViabVgv')+(v.custoProjetadoFonte==='orcado'?box('VGV líquido × Custo × Resultado','cViabRes'):'')+'</div>'+
+ '<div class="chartbox"><h3>Premissas e fontes</h3><table><tbody>'+
+ '<tr><td>Preço médio / m² (vendidos)</td><td class="r">'+BRL(v.precoM2)+'/m²</td></tr>'+
+ '<tr><td>Área vendida × estoque</td><td class="r">'+v.areaVendida.toFixed(0)+' m² · '+v.areaEstoque.toFixed(0)+' m²</td></tr>'+
+ '<tr><td>VGV de estoque</td><td class="r">'+BRL(v.vgvEstoque)+' ('+fonteTag(v.vgvEstoqueFonte)+')</td></tr>'+
+ '<tr><td>Deduções sobre venda (impostos+comissão)</td><td class="r">'+PCT(v.deducoesPct)+' = '+BRL(v.deducoesValor)+'</td></tr>'+
+ '<tr><td>Custo lançado na obra (API)</td><td class="r">'+BRL(v.custoLancado)+'</td></tr>'+
+ '<tr><td>Suprimentos a realizar (compromisso)</td><td class="r">'+BRL(v.custoSuprimentosARealizar)+'</td></tr>'+
+ (v.custoTerreno?'<tr><td>Terreno (manual)</td><td class="r">'+BRL(v.custoTerreno)+'</td></tr>':'')+
+ (v.outrasDespesas?'<tr><td>Outras despesas (manual)</td><td class="r">'+BRL(v.outrasDespesas)+'</td></tr>':'')+
+ '<tr><td><b>Custo total considerado</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b> ('+fonteTag(v.custoProjetadoFonte)+')</td></tr>'+
+ '</tbody></table></div>'+
+ (v.temViab?'':'<div class="note">💡 Os valores de <b>estoque</b>, <b>deduções</b> e <b>custo total orçado</b> são estimados. Para precisão, preencha o bloco <b>viabilidade</b> em <b>data/manual.json</b> (vgvEstoque, deducoesPct, custoTotalOrcado, custoTerreno, outrasDespesas) e rode o build.</div>');
+
 // ORCADO x REALIZADO
 document.querySelector('[data-tab="orcado"]').innerHTML=box('Custo: Orçado × Realizado (por mês)','cOrc')+
  '<div class="note">Realizado = títulos a pagar emitidos (API Sienge). Orçado = valores que você preenche em <b>data/manual.json</b>.</div>';
@@ -341,10 +437,27 @@ document.querySelector('[data-tab="vendas"]').innerHTML='<div class="grid">'+
  '<div class="row2">'+box('VGV por mês (data do contrato)','cVgv')+box('Unidades: vendidas × estoque','cUnid')+'</div>';
 
 // FINANCEIRO
-document.querySelector('[data-tab="financeiro"]').innerHTML='<div class="grid">'+
- kpi('Entradas (recebíveis)',BRL(k.recTotal),'Recebido '+BRL(k.recebido),'green')+
- kpi('Saídas (a pagar)',BRL(k.custoTotal),null,'yel')+
- kpi('A receber',BRL(k.aReceber),null,'blue')+'</div>'+anomBox()+
+const fin=D.financeiro;
+document.querySelector('[data-tab="financeiro"]').innerHTML=
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 10px">A receber — Carteira (unidades vendidas)</h3>'+
+ '<div class="grid">'+
+ kpi('Carteira total',BRL(fin.carteiraTotal),'recebíveis dos contratos','green')+
+ kpi('Já recebido',BRL(fin.carteiraRecebido),PCT(fin.carteiraTotal?100*fin.carteiraRecebido/fin.carteiraTotal:0)+' da carteira')+
+ kpi('A receber (carteira)',BRL(fin.carteiraAReceber),'saldo dos vendidos','blue')+
+ kpi('Inadimplência',BRL(fin.carteiraInadimplencia),PCT(fin.carteiraTotal?100*fin.carteiraInadimplencia/fin.carteiraTotal:0)+' da carteira','red')+
+ '</div>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">A vender — Estoque (potencial, não é recebível ainda)</h3>'+
+ '<div class="grid">'+
+ kpi('VGV de estoque',BRL(fin.estoqueVgv),fin.estoqueUnid+' unidades · '+(fin.estoqueFonte==='manual'?'manual':'estimado'),'yel')+
+ kpi('Potencial total (carteira + estoque)',BRL(fin.carteiraAReceber+fin.estoqueVgv),'a receber + a vender')+
+ '</div>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Obra — Custos (contas lançadas)</h3>'+
+ '<div class="grid">'+
+ kpi('Custo lançado na obra',BRL(fin.obraLancado),fin.obraTitulos+' títulos a pagar','yel')+
+ kpi('Suprimentos contratado',BRL(fin.suprContratado),'realizado '+BRL(fin.suprRealizado))+
+ kpi('Suprimentos a realizar',BRL(fin.suprARealizar),'saldo dos contratos','blue')+
+ '</div>'+anomBox()+
+ '<div class="note">Pago × a pagar não é separado (decisão atual): o Sienge só expõe o status de pagamento parcela a parcela. O valor acima é o total <b>lançado</b> na obra. Dá para ativar a separação depois.</div>'+
  box('Fluxo: Entradas × Saídas por mês','cFluxo')+
  '<div class="chartbox"><h3>Top fornecedores (por valor a pagar)</h3><table><thead><tr><th>Fornecedor</th><th class="r">Valor</th></tr></thead><tbody>'+
  D.topCredores.map(c=>'<tr><td>'+c.nome+'</td><td class="r">'+BRL(c.valor)+'</td></tr>').join('')+'</tbody></table></div>';
@@ -390,6 +503,9 @@ mk('cOrc',{type:'bar',data:{labels:D.fin.meses,datasets:[{label:'Orçado',data:D
 mk('cVgv',{type:'bar',data:{labels:D.vendas.meses,datasets:[{label:'VGV',data:D.vendas.vgvMes,backgroundColor:'#3fb95088'}]},options:{plugins:{tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 mk('cUnid',{type:'doughnut',data:{labels:['Vendidas','Reservadas','Disponíveis'],datasets:[{data:[k.unidVendidas,k.unidReservadas,k.unidDisponiveis],backgroundColor:['#3fb950','#d29922','#2a3441']}]}});
 mk('cFluxo',{data:{labels:D.fin.meses,datasets:[ds('Entradas',D.fin.receita,'#3fb950'),ds('Saídas',D.fin.custo,'#f85149')]},options:{plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
+// Viabilidade
+mk('cViabVgv',{type:'doughnut',data:{labels:['VGV vendido (carteira)','VGV estoque (a vender)'],datasets:[{data:[v.vgvVendido,v.vgvEstoque],backgroundColor:['#3fb950','#d29922']}]},options:{plugins:{tooltip:{callbacks:{label:c=>c.label+': '+BRL(c.parsed)}}}}});
+mk('cViabRes',{type:'bar',data:{labels:['VGV líquido','Custo total','Resultado'],datasets:[{data:[v.vgvLiquido,v.custoProjetado,v.resultado],backgroundColor:['#58a6ff','#f85149',v.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 // Suprimentos: barras por contrato (top 15 por contratado)
 const supTop=sup.contratos.slice(0,15);
 mk('cSupBar',{type:'bar',data:{labels:supTop.map(c=>c.fornecedor.length>22?c.fornecedor.slice(0,22)+'…':c.fornecedor),datasets:[{label:'Realizado',data:supTop.map(c=>c.realizado),backgroundColor:'#3fb950cc'},{label:'A realizar',data:supTop.map(c=>c.aRealizar),backgroundColor:'#d29922aa'}]},options:{indexAxis:'y',scales:{x:{stacked:true},y:{stacked:true}},plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.x)}}}}});
