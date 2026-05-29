@@ -48,7 +48,17 @@ jobs:
           restore-keys: |
             bill-categories-
 
-      - name: Buscar Sienge, classificar, gerar dashboard e criptografar
+      # Cache do status de pagamento (pago/aberto por titulo). Titulos quitados sao
+      # congelados; os em aberto sao re-checados a cada run (pagamento muda no tempo).
+      - name: Cache status de pagamento
+        uses: actions/cache@v4
+        with:
+          path: data/bill_paid.json
+          key: bill-paid-${{ github.run_id }}
+          restore-keys: |
+            bill-paid-
+
+      - name: Buscar Sienge, classificar, status de pagamento, gerar e criptografar
         env:
           SIENGE_SUBDOMAIN: ${{ secrets.SIENGE_SUBDOMAIN }}
           SIENGE_API_USER: ${{ secrets.SIENGE_API_USER }}
@@ -58,6 +68,8 @@ jobs:
         run: |
           node src/fetch.js
           node src/classify_bills.js
+          node src/paid_status.js
+          node src/receivable_status.js
           node src/build.js
           node src/encrypt.js
 

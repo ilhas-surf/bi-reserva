@@ -21,7 +21,10 @@ const customers = read('customers.json');
 const supplyContracts = read('supply_contracts.json');
 const supplyMeasurements = read('supply_measurements.json');
 const billCategories = read('bill_categories.json', {}); // { billId: paymentCategoryId } via /bills/{id}/budget-categories
+const billPaid = read('bill_paid.json', {});             // { billId: {pago, aberto, quitado} } via /bills/{id}/installments
 const summary = read('_summary.json', {});
+
+const LANCAMENTO_INICIO = '2023-08-01'; // data de lancamento das vendas da Reserva
 
 // ---------- Entrada manual (orcado / avanco fisico) ----------
 const MANUAL_FILE = path.join(DATA, 'manual.json');
@@ -29,6 +32,7 @@ if (!fs.existsSync(MANUAL_FILE)) {
   const template = {
     _instrucoes: 'Preencha aqui os dados que NAO vem do Sienge. Datas no formato AAAA-MM. Depois rode: npm run build',
     obraNome: 'Reserva - SPE 01',
+    orcamentoObra: 83000000,
     avancoFisico: [
       { mes: '2025-01', planejado: 5, real: 4 },
       { mes: '2025-02', planejado: 12, real: 10 }
@@ -72,23 +76,17 @@ const ativos = salesContracts.filter((c) => !/cancel/i.test(c.situation || ''));
 const vgv = ativos.reduce((s, c) => s + num(c.totalSellingValue || c.value), 0);
 const contratosPorMes = byMonth(ativos, 'contractDate', 'totalSellingValue');
 
-// unidades por commercialStock (Sienge): V=Vendida, R=Reservada, D=Disponivel,
-// E/M = nao comercializaveis (estoque/permuta/escritorio).
+// unidades por commercialStock (Sienge): V=Vendida, D=Disponivel, E=Permuta,
+// M=Mutuo, R=Reserva tecnica. So D fica disponivel p/ venda; o resto e comprometido.
 const stk = { V: 0, R: 0, D: 0, E: 0, M: 0, outros: 0 };
 for (const u of units) {
   const c = (u.commercialStock || '').toString().toUpperCase();
   if (c in stk) stk[c]++; else stk.outros++;
 }
-const unidVendidas = stk.V;
-const unidReservadas = stk.R;
-const unidDisponiveis = stk.D;
-const unidComercializaveis = stk.V + stk.R + stk.D;
 const unidTotal = units.length;
-let unidEstoque = unidDisponiveis;
-if (!unidTotal && ativos.length) { // fallback: conta unidades dos contratos
-  const us = new Set();
-  for (const c of ativos) for (const u of (c.salesContractUnits || [])) us.add(u.unitId ?? u.id);
-}
+const unidDisponiveis = stk.D;                          // estoque a vender
+const unidVendidas = stk.V + stk.E + stk.M + stk.R;     // comprometidas (vendida+permuta+mutuo+reserva tecnica)
+const unidEstoque = unidDisponiveis;
 
 // area privativa por commercialStock (para estimar preco/m2 e VGV de estoque)
 const areaStk = { V: 0, R: 0, D: 0, E: 0, M: 0 };
@@ -98,10 +96,16 @@ for (const u of units) {
 }
 
 // ---------- RECEBIVEIS ----------
-const recTotal = receivables.reduce((s, r) => s + num(r.receivableBillValue), 0);
-const recebido = receivables.filter((r) => r.payOffDate).reduce((s, r) => s + num(r.receivableBillValue), 0);
-const aReceber = recTotal - recebido;
-const inadimplencia = receivables.filter((r) => r.defaulting).reduce((s, r) => s + num(r.receivableBillValue), 0);
+// Carteira a receber = SALDO DEVEDOR das parcelas (balanceDue), nao o valor de face do
+// contrato. Vem de receivable_balance.json (src/receivable_status.js). O valor de face
+// (recTotal) inclui o que ja foi recebido + juros futuros, por isso superestima.
+const recBal = read('receivable_balance.json', {});
+const recFace = receivables.reduce((s, r) => s + num(r.receivableBillValue), 0);
+const aReceber = num(recBal.saldoAReceber) || (recFace - num(recBal.recebido)); // saldo real da carteira
+const recVencido = num(recBal.vencido);
+const recAVencer = num(recBal.aVencer);
+const recRecebido = num(recBal.recebido);
+const recTotal = aReceber; // "carteira" agora = saldo a receber real
 const recPorMes = byMonth(receivables, 'issueDate', 'receivableBillValue');
 
 // ---------- CUSTOS (contas a pagar) ----------
@@ -120,33 +124,50 @@ const anomalias = payables
 const anomSet = new Set(anomalias.map((a) => a.id));
 const payablesOk = payables.filter((b) => !anomSet.has(b.id));
 
-const custoTotal = payablesOk.reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
-const custoPorMes = byMonth(payablesOk, 'issueDate', 'totalInvoiceAmount');
-const porCredor = {};
-for (const b of payablesOk) {
-  const id = b.creditorId;
-  porCredor[id] = (porCredor[id] || 0) + num(b.totalInvoiceAmount);
-}
-const topCredores = Object.entries(porCredor)
-  .sort((a, b) => b[1] - a[1]).slice(0, 12)
-  .map(([id, v]) => ({ nome: creditorName[id] || ('Credor ' + id), valor: v }));
-
 // ---------- CUSTO REAL x CAPITAL (classificacao por categoria de pagamento) ----------
 // Cada titulo tem uma categoria (bill_categories.json, do /bills/{id}/budget-categories).
-// Movimentacoes de capital (emprestimos/aportes/socios/mutuo) NAO sao custo real do
-// empreendimento -> excluidas da margem. Provisoes (doc PRV) tambem (nao sao caixa).
+// Custo REAL da obra = titulos a partir do lancamento das vendas (01/08/2023),
+// EXCLUINDO movimentacao de capital (emprestimos/aportes/socios/mutuo) e provisoes (PRV).
 const CAP_RE = /^(104|105|231|222|290|19202|29001|20303|2030304|2030305|2030307|2030216|2270107|2050110|2050111|2050112)/;
 const isCapital = (b) => CAP_RE.test(String(billCategories[b.id] || ''));
 const isProvisao = (b) => (b.documentIdentificationId || '').trim() === 'PRV';
-let custoReal = 0, custoCapital = 0, custoProvisao = 0, semCategoria = 0;
+const noPeriodo = (b) => (b.issueDate || '') >= LANCAMENTO_INICIO;
+
+let custoCapital = 0, custoProvisao = 0;
 for (const b of payablesOk) {
   const v = num(b.totalInvoiceAmount);
-  if (isProvisao(b)) { custoProvisao += v; continue; }
-  if (isCapital(b)) { custoCapital += v; continue; }
-  if (!billCategories[b.id]) semCategoria += v;
-  custoReal += v;
+  if (isProvisao(b)) custoProvisao += v;
+  else if (isCapital(b)) custoCapital += v;
 }
+// Titulos de custo real da obra (no periodo, sem capital/provisao)
+const payablesReal = payablesOk.filter((b) => noPeriodo(b) && !isProvisao(b) && !isCapital(b));
+const custoReal = payablesReal.reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
+const semCategoria = payablesReal.filter((b) => !billCategories[b.id]).reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
 const classificados = Object.keys(billCategories).length;
+
+// Obra (construcao) x Outros custos do empreendimento, pela categoria de pagamento.
+// Obra = grupos 202 (materiais/servicos), 221 (projetos/licencas), 234 (custo obra).
+const OBRA_RE = /^(202|221|234)/;
+const custoObraReal = payablesReal.filter((b) => OBRA_RE.test(String(billCategories[b.id] || ''))).reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
+const custoOutros = custoReal - custoObraReal; // terreno, pessoal, tributos, comercial, juridico, etc.
+const orcamentoObra = num(manual.orcamentoObra) || 83_000_000; // orcamento de obra (referencia, informado)
+
+// Pago x a pagar em aberto (status de pagamento por titulo, bill_paid.json)
+let custoPago = 0, aPagarAberto = 0, paidConhecidos = 0;
+for (const b of payablesReal) {
+  const c = billPaid[b.id];
+  if (c) { custoPago += num(c.pago); aPagarAberto += num(c.aberto); paidConhecidos++; }
+}
+const temPaid = Object.keys(billPaid).length > 0;
+
+// series e fornecedores do custo REAL (nao do capital)
+const custoTotal = custoReal; // compat: custoTotal agora = custo real
+const custoPorMes = byMonth(payablesReal, 'issueDate', 'totalInvoiceAmount');
+const porCredor = {};
+for (const b of payablesReal) porCredor[b.creditorId] = (porCredor[b.creditorId] || 0) + num(b.totalInvoiceAmount);
+const topCredores = Object.entries(porCredor)
+  .sort((a, b) => b[1] - a[1]).slice(0, 12)
+  .map(([id, v]) => ({ nome: creditorName[id] || ('Credor ' + id), valor: v }));
 
 // ---------- SUPRIMENTOS (contratos de fornecimento + medicoes) ----------
 // Join: contrato documentId|contractNumber|supplierId  <->  medicao documentId|contractNumber|contractSupplierId
@@ -215,12 +236,11 @@ for (const o of (manual.orcadoMensalCusto || [])) orcMap[o.mes] = num(o.orcado);
 const af = manual.avancoFisico || [];
 
 // ---------- VIABILIDADE (indicadores) — 100% Sienge, sem entrada manual ----------
-// VGV vendido = soma dos contratos ativos (API). VGV estoque = soma do "Valor Atual" das
-// unidades Disponiveis, que vem no campo indexedQuantity do /units (validado contra o
-// relatorio "Unidades por Empreendimento (Estoque)" do Comercial: bate exatamente).
-// Sem comissao (retida no ato pelo corretor, fora do caixa da SPE) e sem deducao manual.
-// Custo = custo REAL (contas a pagar excl. capital/provisao) + suprimentos a realizar (compromisso).
-const vgvVendido = vgv;
+// VGV = valor de TODAS as unidades. Vendidas (contratos) usam o valor de contrato;
+// as demais (permuta, mutuo, reserva tecnica, disponivel) usam o "Valor Atual" do /units
+// (campo indexedQuantity, validado contra o relatorio de Estoque do Comercial).
+// VGV total = vendido + permuta + mutuo + reserva tecnica + estoque (a vender).
+// Sem comissao (retida no ato pelo corretor). Custo = custo REAL + suprimentos a realizar.
 let vgvEstoque = 0, vgvPermuta = 0, vgvMutuo = 0, vgvReservaTec = 0;
 for (const u of units) {
   const c = (u.commercialStock || '').toString().toUpperCase();
@@ -230,13 +250,18 @@ for (const u of units) {
   else if (c === 'M') vgvMutuo += val;         // Mutuo
   else if (c === 'R') vgvReservaTec += val;    // Reserva tecnica
 }
+const vgvVendido = vgv + vgvPermuta + vgvMutuo + vgvReservaTec; // comprometido (vendido + permuta + mutuo + reserva tec.)
 const precoM2Estoque = areaStk.D ? vgvEstoque / areaStk.D : 0;
-const vgvTotal = vgvVendido + vgvEstoque;      // sellable = vendido + disponivel
+const vgvTotal = vgvVendido + vgvEstoque;      // todas as unidades
 const custoSuprARealizar = (typeof supTotalARealizar === 'number' ? supTotalARealizar : 0);
-const custoProjetado = custoReal + custoSuprARealizar; // realizado real + comprometido (obra)
+// Obra projetada = obra realizada + suprimentos a realizar (compromisso de construcao)
+const custoObraProjetado = custoObraReal + custoSuprARealizar;
+const pctObra = orcamentoObra ? 100 * custoObraReal / orcamentoObra : 0; // % executado do orcamento
+// Custo total do empreendimento (margem) = obra projetada + outros custos
+const custoProjetado = custoObraProjetado + custoOutros;
 const resultado = vgvTotal - custoProjetado;
 const margemPct = vgvTotal ? 100 * resultado / vgvTotal : 0;
-const exposicaoCaixa = custoReal - recebido;   // caixa real ja desembolsado menos recebido
+const exposicaoCaixa = custoReal - recRecebido;   // caixa real ja desembolsado menos recebido
 
 // ---------- Series para graficos ----------
 const mesesFin = sortedMonths(Object.keys(custoPorMes), Object.keys(recPorMes), Object.keys(orcMap));
@@ -248,10 +273,9 @@ const payload = {
   obraNome: manual.obraNome || 'SPE 01',
   kpis: {
     vgv, contratosAtivos: ativos.length, contratosCancelados: canceladas.length,
-    unidVendidas, unidReservadas, unidDisponiveis, unidComercializaveis, unidTotal, unidEstoque,
-    recTotal, recebido, aReceber, inadimplencia,
-    custoTotal, qtdTitulosPagar: payablesOk.length,
-    resultadoBruto: recTotal - custoTotal,
+    unidVendidas, unidDisponiveis, unidTotal, unidEstoque,
+    aReceber, recVencido, recAVencer,
+    custoTotal, qtdTitulosPagar: payablesReal.length,
   },
   anomalias,
   fin: {
@@ -282,23 +306,26 @@ const payload = {
     medidoAcum: cronMedidoAcum,
   },
   viabilidade: {
-    vgvVendido, vgvEstoque, vgvTotal,
+    vgvContratos: vgv, vgvVendido, vgvEstoque, vgvTotal,
     vgvPermuta, vgvMutuo, vgvReservaTec,
-    precoM2Estoque, areaVendida: areaStk.V, areaEstoque: areaStk.D,
-    custoLancado: custoTotal, custoReal, custoCapital, custoProvisao,
+    precoM2Estoque, areaEstoque: areaStk.D,
+    custoReal, custoObraReal, custoOutros, custoCapital, custoProvisao,
+    orcamentoObra, custoObraProjetado, pctObra,
     custoSuprARealizar, custoProjetado,
+    custoPago, aPagarAberto, temPaid,
     resultado, margemPct, exposicaoCaixa,
-    classificados, semCategoria, qtdTitulos: payablesOk.length,
+    classificados, semCategoria, qtdTitulos: payablesReal.length,
   },
   financeiro: {
-    // carteira (vendido) — firme, da API
-    carteiraTotal: recTotal, carteiraRecebido: recebido, carteiraAReceber: aReceber,
-    carteiraInadimplencia: inadimplencia,
+    // carteira (vendido) — saldo a receber real (balanceDue das parcelas)
+    carteiraAReceber: aReceber, carteiraVencido: recVencido, carteiraAVencer: recAVencer,
     // estoque (a vender) — potencial, nao e conta a receber ainda
     estoqueVgv: vgvEstoque, estoqueUnid: unidDisponiveis,
-    // obra (custo) — lancado total e custo real (excl. capital/provisao)
-    obraLancado: custoTotal, obraReal: custoReal, obraCapital: custoCapital, obraProvisao: custoProvisao,
-    obraTitulos: payablesOk.length,
+    // obra (construcao) x outros; pago/aberto do custo real total
+    custoReal, obraConstrucao: custoObraReal, outros: custoOutros,
+    orcamentoObra, pctObra, custoObraProjetado,
+    obraPago: custoPago, obraAberto: aPagarAberto, temPaid,
+    obraTitulos: payablesReal.length,
     suprContratado: supTotalContratado, suprRealizado: supTotalRealizado, suprARealizar: supTotalARealizar,
   },
   avancoFisico: {
@@ -314,16 +341,12 @@ const html = renderHtml(payload);
 fs.writeFileSync(path.join(ROOT, 'dashboard.html'), html);
 console.log('Dashboard gerado: dashboard.html');
 console.log(`  Vendas: ${ativos.length} contratos | VGV ${fmtBRL(vgv)}`);
-console.log(`  Recebiveis: ${fmtBRL(recTotal)} (recebido ${fmtBRL(recebido)}, inadimpl. ${fmtBRL(inadimplencia)})`);
-console.log(`  Custos (a pagar): ${payablesOk.length} titulos | ${fmtBRL(custoTotal)}`);
+console.log(`  Carteira a receber (saldo): ${fmtBRL(aReceber)} (vencido ${fmtBRL(recVencido)} · a vencer ${fmtBRL(recAVencer)})`);
+console.log(`  Custo real (>=${LANCAMENTO_INICIO}, sem capital/provisao): ${payablesReal.length} titulos | ${fmtBRL(custoReal)}`);
+console.log(`    pago ${fmtBRL(custoPago)} | a pagar em aberto ${fmtBRL(aPagarAberto)} | status conhecido p/ ${paidConhecidos}/${payablesReal.length} titulos`);
 console.log(`  Suprimentos: ${contratosSup.length} contratos (${supQtdRescindidos} rescindidos) | contratado ${fmtBRL(supTotalContratado)} · realizado ${fmtBRL(supTotalRealizado)} · a realizar ${fmtBRL(supTotalARealizar)}`);
-console.log(`  Viabilidade: VGV total ${fmtBRL(vgvTotal)} (vendido ${fmtBRL(vgvVendido)} + estoque ${fmtBRL(vgvEstoque)})`);
-console.log(`    Custo real ${fmtBRL(custoReal)} (excl. capital ${fmtBRL(custoCapital)} + provisao ${fmtBRL(custoProvisao)}) + suprim. a realizar ${fmtBRL(custoSuprARealizar)} = ${fmtBRL(custoProjetado)}`);
-console.log(`    Resultado ${fmtBRL(resultado)} | Margem ${margemPct.toFixed(1)}% | classificados ${classificados}/${payablesOk.length}`);
-if (anomalias.length) {
-  console.log(`  ! ${anomalias.length} titulo(s) anomalo(s) excluido(s) (> VGV):`);
-  for (const a of anomalias) console.log(`    - #${a.id} ${fmtBRL(a.valor)} ${a.credor} "${a.nota}"`);
-}
+console.log(`  Viabilidade: VGV total ${fmtBRL(vgvTotal)} (contratos ${fmtBRL(vgv)} + permuta/mutuo/reserva ${fmtBRL(vgvPermuta + vgvMutuo + vgvReservaTec)} + estoque ${fmtBRL(vgvEstoque)})`);
+console.log(`    Custo ${fmtBRL(custoProjetado)} | Resultado ${fmtBRL(resultado)} | Margem ${margemPct.toFixed(1)}%`);
 
 function renderHtml(d) {
   const J = JSON.stringify(d);
@@ -389,48 +412,66 @@ function kpi(label,val,sub,cls){return '<div class="card kpi"><div class="label"
 function box(title,canvasId){return '<div class="chartbox"><h3>'+title+'</h3><canvas id="'+canvasId+'"></canvas></div>';}
 
 const k=D.kpis;
-function anomBox(){if(!D.anomalias||!D.anomalias.length)return '';
- return '<div class="note" style="border-color:#7d4e00;background:#2a1f0a">⚠️ '+D.anomalias.length+' título(s) a pagar excluído(s) do custo por serem maiores que o VGV inteiro — provável erro de lançamento no Sienge:<ul style="margin:6px 0 0 18px">'+
- D.anomalias.map(a=>'<li>#'+a.id+' · '+BRL(a.valor)+' · '+a.credor+(a.nota?' · "'+a.nota+'"':'')+(a.data?' · '+a.data:'')+'</li>').join('')+'</ul></div>';}
-// GERAL
-document.querySelector('[data-tab="geral"]').innerHTML='<div class="grid">'+
- kpi('VGV (contratos ativos)',BRL(k.vgv),k.contratosAtivos+' contratos','green')+
- kpi('Unidades vendidas',k.unidVendidas+' / '+k.unidComercializaveis,k.unidDisponiveis+' disponíveis · '+k.unidReservadas+' reservadas','blue')+
- kpi('Total a receber',BRL(k.recTotal),'Recebido '+BRL(k.recebido))+
- kpi('Inadimplência',BRL(k.inadimplencia),PCT(k.recTotal?100*k.inadimplencia/k.recTotal:0)+' do total','red')+
- kpi('Custo (contas a pagar)',BRL(k.custoTotal),k.qtdTitulosPagar+' títulos','yel')+
- kpi('Resultado (receb. − custo)',BRL(k.resultadoBruto),'visão de caixa simplificada',k.resultadoBruto>=0?'green':'red')+
- '</div>'+anomBox()+box('Receita × Custo por mês','cGeral')+
- (D.temManual?'':'<div class="note">💡 Preencha <b>data/manual.json</b> (orçado mensal e avanço físico) e rode <b>npm run build</b> para ativar as abas Orçado×Realizado e Avanço físico.</div>');
+const anomBox=()=>''; // banner de anomalia/RET removido (a pedido)
+// GERAL — dashboard resumo
+const vg=D.viabilidade, fg=D.financeiro;
+document.querySelector('[data-tab="geral"]').innerHTML=
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 10px">Viabilidade</h3>'+
+ '<div class="grid">'+
+ kpi('VGV total',BRL(vg.vgvTotal),k.unidTotal+' unidades','green')+
+ kpi('Custo total',BRL(vg.custoProjetado),'real + a realizar','yel')+
+ kpi('Resultado projetado',BRL(vg.resultado),'VGV − custo',vg.resultado>=0?'green':'red')+
+ kpi('Margem de resultado',PCT(vg.margemPct),'resultado / VGV',vg.margemPct>=0?'green':'red')+
+ '</div>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Vendas e estoque</h3>'+
+ '<div class="grid">'+
+ kpi('Unidades vendidas',k.unidVendidas+' / '+k.unidTotal,k.unidDisponiveis+' disponíveis (estoque)','blue')+
+ kpi('VGV vendido',BRL(vg.vgvVendido),PCT(vg.vgvTotal?100*vg.vgvVendido/vg.vgvTotal:0)+' do VGV','green')+
+ kpi('VGV em estoque',BRL(vg.vgvEstoque),k.unidDisponiveis+' un. a vender','yel')+
+ kpi('Contratos ativos',k.contratosAtivos,k.contratosCancelados+' cancelados')+
+ '</div>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Financeiro</h3>'+
+ '<div class="grid">'+
+ kpi('A receber (carteira)',BRL(fg.carteiraAReceber),'saldo das parcelas','blue')+
+ kpi('Obra realizada',BRL(fg.obraConstrucao),PCT(fg.pctObra)+' do orçado','yel')+
+ (fg.temPaid?kpi('A pagar em aberto',BRL(fg.obraAberto),'saldo a vencer','red'):'')+
+ kpi('Suprimentos a realizar',BRL(fg.suprARealizar),'compromisso de obra')+
+ '</div>'+
+ '<div class="row2">'+box('Receita × Custo por mês','cGeral')+box('VGV × Custo × Resultado','cGeralRes')+'</div>';
 
 // VIABILIDADE — tudo da API Sienge
 const v=D.viabilidade;
 document.querySelector('[data-tab="viabilidade"]').innerHTML=
  '<div class="grid">'+
- kpi('VGV total',BRL(v.vgvTotal),'vendido + estoque a vender','green')+
- kpi('VGV vendido (carteira)',BRL(v.vgvVendido),PCT(v.vgvTotal?100*v.vgvVendido/v.vgvTotal:0)+' do VGV','blue')+
+ kpi('VGV total',BRL(v.vgvTotal),'todas as unidades','green')+
+ kpi('VGV vendido (comprometido)',BRL(v.vgvVendido),PCT(v.vgvTotal?100*v.vgvVendido/v.vgvTotal:0)+' do VGV','blue')+
  kpi('VGV estoque (a vender)',BRL(v.vgvEstoque),v.areaEstoque.toFixed(0)+' m² · '+BRL(v.precoM2Estoque)+'/m²','yel')+
  kpi('Custo total',BRL(v.custoProjetado),'real + suprim. a realizar')+
  kpi('Resultado projetado',BRL(v.resultado),'VGV − custo',v.resultado>=0?'green':'red')+
  kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV',v.margemPct>=0?'green':'red')+
  '</div>'+
  '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV × Custo × Resultado','cViabRes')+'</div>'+
- '<div class="chartbox"><h3>Composição do custo (Sienge)</h3><table><tbody>'+
- '<tr><td>Custo lançado total (contas a pagar)</td><td class="r">'+BRL(v.custoLancado)+'</td></tr>'+
- '<tr><td>(−) Movimentação de capital (empréstimo/aporte/sócios/mútuo)</td><td class="r red">−'+BRL(v.custoCapital)+'</td></tr>'+
- '<tr><td>(−) Provisões (PRV, não-caixa)</td><td class="r red">−'+BRL(v.custoProvisao)+'</td></tr>'+
- '<tr><td><b>Custo real incorrido</b></td><td class="r"><b>'+BRL(v.custoReal)+'</b></td></tr>'+
- '<tr><td>(+) Suprimentos a realizar (compromisso de obra)</td><td class="r">+'+BRL(v.custoSuprARealizar)+'</td></tr>'+
- '<tr><td><b>Custo total considerado na margem</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b></td></tr>'+
+ '<div class="row2">'+
+ '<div class="chartbox"><h3>Custo do empreendimento (Sienge)</h3><table><tbody>'+
+ '<tr><td><b>Obra (construção)</b></td><td class="r"></td></tr>'+
+ '<tr><td>· realizado</td><td class="r">'+BRL(v.custoObraReal)+'</td></tr>'+
+ '<tr><td>· suprimentos a realizar (compromisso)</td><td class="r">+'+BRL(v.custoSuprARealizar)+'</td></tr>'+
+ '<tr><td>· obra projetada</td><td class="r"><b>'+BRL(v.custoObraProjetado)+'</b></td></tr>'+
+ '<tr><td style="color:var(--mut)">orçado: '+BRL(v.orcamentoObra)+' · executado '+PCT(v.pctObra)+'</td><td></td></tr>'+
+ '<tr><td><b>Outros custos</b> (terreno, pessoal, tributos, comercial…)</td><td class="r">'+BRL(v.custoOutros)+'</td></tr>'+
+ '<tr><td><b>Custo total (margem)</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b></td></tr>'+
+ '<tr><td style="color:var(--mut)">excluídos: capital '+BRL(v.custoCapital)+' · provisões '+BRL(v.custoProvisao)+'</td><td></td></tr>'+
  '</tbody></table></div>'+
- '<div class="chartbox"><h3>Composição do VGV por situação (Comercial)</h3><table><tbody>'+
- '<tr><td>Vendido</td><td class="r">'+BRL(v.vgvVendido)+'</td></tr>'+
- '<tr><td>Estoque a vender (Disponível)</td><td class="r">'+BRL(v.vgvEstoque)+'</td></tr>'+
- (v.vgvPermuta?'<tr><td>Permuta (fora do VGV de venda)</td><td class="r mut">'+BRL(v.vgvPermuta)+'</td></tr>':'')+
- (v.vgvMutuo?'<tr><td>Mútuo (fora do VGV de venda)</td><td class="r mut">'+BRL(v.vgvMutuo)+'</td></tr>':'')+
- (v.vgvReservaTec?'<tr><td>Reserva técnica (fora do VGV de venda)</td><td class="r mut">'+BRL(v.vgvReservaTec)+'</td></tr>':'')+
+ '<div class="chartbox"><h3>Composição do VGV por situação</h3><table><tbody>'+
+ '<tr><td>Vendido (contratos)</td><td class="r">'+BRL(v.vgvContratos)+'</td></tr>'+
+ (v.vgvPermuta?'<tr><td>Permuta</td><td class="r">'+BRL(v.vgvPermuta)+'</td></tr>':'')+
+ (v.vgvMutuo?'<tr><td>Mútuo</td><td class="r">'+BRL(v.vgvMutuo)+'</td></tr>':'')+
+ (v.vgvReservaTec?'<tr><td>Reserva técnica</td><td class="r">'+BRL(v.vgvReservaTec)+'</td></tr>':'')+
+ '<tr><td>Estoque a vender (Disponível)</td><td class="r yel">'+BRL(v.vgvEstoque)+'</td></tr>'+
+ '<tr><td><b>VGV total</b></td><td class="r"><b>'+BRL(v.vgvTotal)+'</b></td></tr>'+
  '</tbody></table></div>'+
- '<div class="note">Tudo da API Sienge. VGV estoque = "Valor Atual" das unidades Disponíveis (campo do /units, confere com o relatório de Estoque do Comercial). Custo exclui capital (empréstimos/aportes/sócios/mútuo) e provisões — '+v.classificados+' títulos classificados por categoria de pagamento. Sem comissão (retida no ato pelo corretor).</div>';
+ '</div>'+
+ '<div class="note">Tudo da API Sienge. VGV = "Valor Atual" das unidades (/units, confere com o relatório de Estoque do Comercial); vendido usa o valor de contrato. Custo a partir de 01/08/2023 (lançamento das vendas), excluindo capital (empréstimos/aportes/sócios/mútuo) e provisões — '+v.classificados+' títulos classificados por categoria. Sem comissão (retida no ato pelo corretor).</div>';
 
 // ORCADO x REALIZADO
 document.querySelector('[data-tab="orcado"]').innerHTML=box('Custo: Orçado × Realizado (por mês)','cOrc')+
@@ -439,33 +480,38 @@ document.querySelector('[data-tab="orcado"]').innerHTML=box('Custo: Orçado × R
 // VENDAS
 document.querySelector('[data-tab="vendas"]').innerHTML='<div class="grid">'+
  kpi('VGV',BRL(k.vgv),null,'green')+kpi('Contratos ativos',k.contratosAtivos)+kpi('Cancelados',k.contratosCancelados,null,'red')+
- kpi('Estoque',k.unidEstoque+' un.',k.unidVendidas+' vendidas')+'</div>'+
+ kpi('Estoque',k.unidDisponiveis+' un.',k.unidVendidas+' comprometidas')+'</div>'+
  '<div class="row2">'+box('VGV por mês (data do contrato)','cVgv')+box('Unidades: vendidas × estoque','cUnid')+'</div>';
 
 // FINANCEIRO
 const fin=D.financeiro;
 document.querySelector('[data-tab="financeiro"]').innerHTML=
- '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 10px">A receber — Carteira (unidades vendidas)</h3>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 10px">A receber — Carteira (saldo das parcelas)</h3>'+
  '<div class="grid">'+
- kpi('Carteira total',BRL(fin.carteiraTotal),'recebíveis dos contratos','green')+
- kpi('Já recebido',BRL(fin.carteiraRecebido),PCT(fin.carteiraTotal?100*fin.carteiraRecebido/fin.carteiraTotal:0)+' da carteira')+
- kpi('A receber (carteira)',BRL(fin.carteiraAReceber),'saldo dos vendidos','blue')+
- kpi('Inadimplência',BRL(fin.carteiraInadimplencia),PCT(fin.carteiraTotal?100*fin.carteiraInadimplencia/fin.carteiraTotal:0)+' da carteira','red')+
+ kpi('A receber (carteira)',BRL(fin.carteiraAReceber),'saldo devedor dos contratos','blue')+
+ kpi('A vencer',BRL(fin.carteiraAVencer),'parcelas futuras','green')+
+ kpi('Vencido (em atraso)',BRL(fin.carteiraVencido),PCT(fin.carteiraAReceber?100*fin.carteiraVencido/fin.carteiraAReceber:0)+' da carteira','red')+
  '</div>'+
  '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">A vender — Estoque (potencial, não é recebível ainda)</h3>'+
  '<div class="grid">'+
  kpi('VGV de estoque',BRL(fin.estoqueVgv),fin.estoqueUnid+' unidades disponíveis','yel')+
  kpi('Potencial total (carteira + estoque)',BRL(fin.carteiraAReceber+fin.estoqueVgv),'a receber + a vender')+
  '</div>'+
- '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Obra — Custos (contas a pagar)</h3>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Obra — Construção (a partir de ago/2023)</h3>'+
  '<div class="grid">'+
- kpi('Custo real incorrido',BRL(fin.obraReal),'exclui capital e provisões','yel')+
- kpi('Custo lançado total',BRL(fin.obraLancado),fin.obraTitulos+' títulos (inclui capital '+BRL(fin.obraCapital)+')')+
+ kpi('Obra realizada',BRL(fin.obraConstrucao),PCT(fin.pctObra)+' do orçado ('+BRL(fin.orcamentoObra)+')','yel')+
  kpi('Suprimentos a realizar',BRL(fin.suprARealizar),'compromisso de obra','blue')+
- '</div>'+anomBox()+
- '<div class="note">Custo real exclui movimentação de capital (empréstimos/aportes/sócios/mútuo: '+BRL(fin.obraCapital)+') e provisões ('+BRL(fin.obraProvisao)+'), classificadas pela categoria de pagamento de cada título. Pago × a pagar não é separado.</div>'+
+ (fin.temPaid?kpi('Já pago (total real)',BRL(fin.obraPago),PCT(fin.custoReal?100*fin.obraPago/fin.custoReal:0)+' do custo','green'):'')+
+ (fin.temPaid?kpi('A pagar em aberto',BRL(fin.obraAberto),'saldo a vencer','red'):'')+
+ '</div>'+
+ '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Outros custos do empreendimento</h3>'+
+ '<div class="grid">'+
+ kpi('Outros custos',BRL(fin.outros),'terreno, pessoal, tributos, comercial…')+
+ kpi('Custo real total',BRL(fin.custoReal),fin.obraTitulos+' títulos (obra + outros)')+
+ '</div>'+
+ '<div class="note">Obra = categorias de construção (materiais, serviços, projetos). Outros = terreno, pessoal, tributos, jurídico, comercial. Exclui capital (empréstimos/aportes/sócios/mútuo) e provisões. Orçamento de obra (R$83M) é referência informada; pago × a pagar vêm do status das parcelas.</div>'+
  box('Fluxo: Entradas × Saídas por mês','cFluxo')+
- '<div class="chartbox"><h3>Top fornecedores (por valor a pagar)</h3><table><thead><tr><th>Fornecedor</th><th class="r">Valor</th></tr></thead><tbody>'+
+ '<div class="chartbox"><h3>Top fornecedores (custo real)</h3><table><thead><tr><th>Fornecedor</th><th class="r">Valor</th></tr></thead><tbody>'+
  D.topCredores.map(c=>'<tr><td>'+c.nome+'</td><td class="r">'+BRL(c.valor)+'</td></tr>').join('')+'</tbody></table></div>';
 
 // SUPRIMENTOS
@@ -507,10 +553,12 @@ const ds=(label,data,color,type)=>({label,data,borderColor:color,backgroundColor
 mk('cGeral',{data:{labels:D.fin.meses,datasets:[ds('Receita',D.fin.receita,'#3fb950'),ds('Custo',D.fin.custo,'#d29922')]},options:{responsive:true,plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
 mk('cOrc',{type:'bar',data:{labels:D.fin.meses,datasets:[{label:'Orçado',data:D.fin.orcado,backgroundColor:'#58a6ff88'},{label:'Realizado',data:D.fin.custo,backgroundColor:'#d2992288'}]},options:{plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
 mk('cVgv',{type:'bar',data:{labels:D.vendas.meses,datasets:[{label:'VGV',data:D.vendas.vgvMes,backgroundColor:'#3fb95088'}]},options:{plugins:{tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
-mk('cUnid',{type:'doughnut',data:{labels:['Vendidas','Reservadas','Disponíveis'],datasets:[{data:[k.unidVendidas,k.unidReservadas,k.unidDisponiveis],backgroundColor:['#3fb950','#d29922','#2a3441']}]}});
+mk('cUnid',{type:'doughnut',data:{labels:['Comprometidas','Disponíveis'],datasets:[{data:[k.unidVendidas,k.unidDisponiveis],backgroundColor:['#3fb950','#d29922']}]}});
 mk('cFluxo',{data:{labels:D.fin.meses,datasets:[ds('Entradas',D.fin.receita,'#3fb950'),ds('Saídas',D.fin.custo,'#f85149')]},options:{plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
+// Visao geral: VGV x Custo x Resultado
+mk('cGeralRes',{type:'bar',data:{labels:['VGV total','Custo total','Resultado'],datasets:[{data:[vg.vgvTotal,vg.custoProjetado,vg.resultado],backgroundColor:['#58a6ff','#f85149',vg.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 // Viabilidade
-mk('cViabVgv',{type:'doughnut',data:{labels:['VGV vendido (carteira)','VGV estoque (a vender)'],datasets:[{data:[v.vgvVendido,v.vgvEstoque],backgroundColor:['#3fb950','#d29922']}]},options:{plugins:{tooltip:{callbacks:{label:c=>c.label+': '+BRL(c.parsed)}}}}});
+mk('cViabVgv',{type:'doughnut',data:{labels:['VGV vendido (comprometido)','VGV estoque (a vender)'],datasets:[{data:[v.vgvVendido,v.vgvEstoque],backgroundColor:['#3fb950','#d29922']}]},options:{plugins:{tooltip:{callbacks:{label:c=>c.label+': '+BRL(c.parsed)}}}}});
 mk('cViabRes',{type:'bar',data:{labels:['VGV total','Custo total','Resultado'],datasets:[{data:[v.vgvTotal,v.custoProjetado,v.resultado],backgroundColor:['#58a6ff','#f85149',v.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 // Suprimentos: barras por contrato (top 15 por contratado)
 const supTop=sup.contratos.slice(0,15);
