@@ -33,6 +33,7 @@ if (!fs.existsSync(MANUAL_FILE)) {
     _instrucoes: 'Preencha aqui os dados que NAO vem do Sienge. Datas no formato AAAA-MM. Depois rode: npm run build',
     obraNome: 'Reserva - SPE 01',
     orcamentoObra: 83000000,
+    retPct: 4.7,
     avancoFisico: [
       { mes: '2025-01', planejado: 5, real: 4 },
       { mes: '2025-02', planejado: 12, real: 10 }
@@ -254,11 +255,14 @@ const vgvVendido = vgv + vgvPermuta + vgvMutuo + vgvReservaTec; // comprometido 
 const precoM2Estoque = areaStk.D ? vgvEstoque / areaStk.D : 0;
 const vgvTotal = vgvVendido + vgvEstoque;      // todas as unidades
 const custoSuprARealizar = (typeof supTotalARealizar === 'number' ? supTotalARealizar : 0);
-// Obra projetada = obra realizada + suprimentos a realizar (compromisso de construcao)
-const custoObraProjetado = custoObraReal + custoSuprARealizar;
 const pctObra = orcamentoObra ? 100 * custoObraReal / orcamentoObra : 0; // % executado do orcamento
-// Custo total do empreendimento (margem) = obra projetada + outros custos
-const custoProjetado = custoObraProjetado + custoOutros;
+
+// ---- Custo da VIABILIDADE (projecao) = Orcamento da Obra (manual) + Impostos RET ----
+// Orcamento da obra: o do Sienge esta desatualizado -> manual (orcamentoObra, R$83M).
+// RET: imposto sobre a receita das vendas (Regime Especial de Tributacao), retPct% do VGV.
+const retPct = manual.retPct != null ? num(manual.retPct) : 4.7;
+const impostoRET = vgvTotal * retPct / 100;
+const custoProjetado = orcamentoObra + impostoRET;   // custo total da viabilidade
 const resultado = vgvTotal - custoProjetado;
 const margemPct = vgvTotal ? 100 * resultado / vgvTotal : 0;
 const exposicaoCaixa = custoReal - recRecebido;   // caixa real ja desembolsado menos recebido
@@ -309,21 +313,18 @@ const payload = {
     vgvContratos: vgv, vgvVendido, vgvEstoque, vgvTotal,
     vgvPermuta, vgvMutuo, vgvReservaTec,
     precoM2Estoque, areaEstoque: areaStk.D,
-    custoReal, custoObraReal, custoOutros, custoCapital, custoProvisao,
-    orcamentoObra, custoObraProjetado, pctObra,
-    custoSuprARealizar, custoProjetado,
-    custoPago, aPagarAberto, temPaid,
+    orcamentoObra, retPct, impostoRET, custoProjetado,
+    custoObraReal, custoOutros, pctObra,
     resultado, margemPct, exposicaoCaixa,
-    classificados, semCategoria, qtdTitulos: payablesReal.length,
   },
   financeiro: {
     // carteira (vendido) — saldo a receber real (balanceDue das parcelas)
     carteiraAReceber: aReceber, carteiraVencido: recVencido, carteiraAVencer: recAVencer,
     // estoque (a vender) — potencial, nao e conta a receber ainda
     estoqueVgv: vgvEstoque, estoqueUnid: unidDisponiveis,
-    // obra (construcao) x outros; pago/aberto do custo real total
+    // obra (construcao) x outros; pago/aberto do custo real total (execucao)
     custoReal, obraConstrucao: custoObraReal, outros: custoOutros,
-    orcamentoObra, pctObra, custoObraProjetado,
+    orcamentoObra, pctObra,
     obraPago: custoPago, obraAberto: aPagarAberto, temPaid,
     obraTitulos: payablesReal.length,
     suprContratado: supTotalContratado, suprRealizado: supTotalRealizado, suprARealizar: supTotalARealizar,
@@ -346,7 +347,8 @@ console.log(`  Custo real (>=${LANCAMENTO_INICIO}, sem capital/provisao): ${paya
 console.log(`    pago ${fmtBRL(custoPago)} | a pagar em aberto ${fmtBRL(aPagarAberto)} | status conhecido p/ ${paidConhecidos}/${payablesReal.length} titulos`);
 console.log(`  Suprimentos: ${contratosSup.length} contratos (${supQtdRescindidos} rescindidos) | contratado ${fmtBRL(supTotalContratado)} · realizado ${fmtBRL(supTotalRealizado)} · a realizar ${fmtBRL(supTotalARealizar)}`);
 console.log(`  Viabilidade: VGV total ${fmtBRL(vgvTotal)} (contratos ${fmtBRL(vgv)} + permuta/mutuo/reserva ${fmtBRL(vgvPermuta + vgvMutuo + vgvReservaTec)} + estoque ${fmtBRL(vgvEstoque)})`);
-console.log(`    Custo ${fmtBRL(custoProjetado)} | Resultado ${fmtBRL(resultado)} | Margem ${margemPct.toFixed(1)}%`);
+console.log(`    Custo total ${fmtBRL(custoProjetado)} = orcamento obra ${fmtBRL(orcamentoObra)} + RET ${retPct}% ${fmtBRL(impostoRET)} | Resultado ${fmtBRL(resultado)} | Margem ${margemPct.toFixed(1)}%`);
+console.log(`    (execucao real: obra ${fmtBRL(custoObraReal)} de ${fmtBRL(orcamentoObra)} = ${pctObra.toFixed(0)}% | outros ${fmtBRL(custoOutros)})`);
 
 function renderHtml(d) {
   const J = JSON.stringify(d);
@@ -419,7 +421,7 @@ document.querySelector('[data-tab="geral"]').innerHTML=
  '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 10px">Viabilidade</h3>'+
  '<div class="grid">'+
  kpi('VGV total',BRL(vg.vgvTotal),k.unidTotal+' unidades','green')+
- kpi('Custo total',BRL(vg.custoProjetado),'real + a realizar','yel')+
+ kpi('Custo total',BRL(vg.custoProjetado),'orçamento obra + RET','yel')+
  kpi('Resultado projetado',BRL(vg.resultado),'VGV − custo',vg.resultado>=0?'green':'red')+
  kpi('Margem de resultado',PCT(vg.margemPct),'resultado / VGV',vg.margemPct>=0?'green':'red')+
  '</div>'+
@@ -446,21 +448,18 @@ document.querySelector('[data-tab="viabilidade"]').innerHTML=
  kpi('VGV total',BRL(v.vgvTotal),'todas as unidades','green')+
  kpi('VGV vendido (comprometido)',BRL(v.vgvVendido),PCT(v.vgvTotal?100*v.vgvVendido/v.vgvTotal:0)+' do VGV','blue')+
  kpi('VGV estoque (a vender)',BRL(v.vgvEstoque),v.areaEstoque.toFixed(0)+' m² · '+BRL(v.precoM2Estoque)+'/m²','yel')+
- kpi('Custo total',BRL(v.custoProjetado),'real + suprim. a realizar')+
+ kpi('Custo total',BRL(v.custoProjetado),'orçamento obra + RET')+
  kpi('Resultado projetado',BRL(v.resultado),'VGV − custo',v.resultado>=0?'green':'red')+
  kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV',v.margemPct>=0?'green':'red')+
  '</div>'+
  '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV × Custo × Resultado','cViabRes')+'</div>'+
  '<div class="row2">'+
- '<div class="chartbox"><h3>Custo do empreendimento (Sienge)</h3><table><tbody>'+
- '<tr><td><b>Obra (construção)</b></td><td class="r"></td></tr>'+
- '<tr><td>· realizado</td><td class="r">'+BRL(v.custoObraReal)+'</td></tr>'+
- '<tr><td>· suprimentos a realizar (compromisso)</td><td class="r">+'+BRL(v.custoSuprARealizar)+'</td></tr>'+
- '<tr><td>· obra projetada</td><td class="r"><b>'+BRL(v.custoObraProjetado)+'</b></td></tr>'+
- '<tr><td style="color:var(--mut)">orçado: '+BRL(v.orcamentoObra)+' · executado '+PCT(v.pctObra)+'</td><td></td></tr>'+
- '<tr><td><b>Outros custos</b> (terreno, pessoal, tributos, comercial…)</td><td class="r">'+BRL(v.custoOutros)+'</td></tr>'+
- '<tr><td><b>Custo total (margem)</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b></td></tr>'+
- '<tr><td style="color:var(--mut)">excluídos: capital '+BRL(v.custoCapital)+' · provisões '+BRL(v.custoProvisao)+'</td><td></td></tr>'+
+ '<div class="chartbox"><h3>Custo total da viabilidade</h3><table><tbody>'+
+ '<tr><td>Orçamento da obra <span style="color:var(--mut)">(manual)</span></td><td class="r">'+BRL(v.orcamentoObra)+'</td></tr>'+
+ '<tr><td>Impostos — RET ('+v.retPct+'% do VGV)</td><td class="r">'+BRL(v.impostoRET)+'</td></tr>'+
+ '<tr><td><b>Custo total</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b></td></tr>'+
+ '<tr><td style="color:var(--mut);padding-top:14px">Execução real da obra (Sienge): '+BRL(v.custoObraReal)+' = '+PCT(v.pctObra)+' do orçado</td><td></td></tr>'+
+ '<tr><td style="color:var(--mut)">Outros custos lançados (terreno/comercial/adm): '+BRL(v.custoOutros)+'</td><td></td></tr>'+
  '</tbody></table></div>'+
  '<div class="chartbox"><h3>Composição do VGV por situação</h3><table><tbody>'+
  '<tr><td>Vendido (contratos)</td><td class="r">'+BRL(v.vgvContratos)+'</td></tr>'+

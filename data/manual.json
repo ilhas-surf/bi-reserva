@@ -2,6 +2,7 @@
   "_instrucoes": "Dados que NAO vem do Sienge. Preencha e faca commit; o painel atualiza no proximo build (ou rode Actions > Run workflow). avancoFisico: % acumulado planejado e real (curva S). orcadoMensalCusto: meta de custo do mes em R$. orcamentoObra: orcamento total da construcao em R$ (referencia p/ comparar com o realizado).",
   "obraNome": "Reserva - SPE 01",
   "orcamentoObra": 83000000,
+  "retPct": 4.7,
   "avancoFisico": [
     {
       "mes": "2025-01",
