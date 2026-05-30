@@ -33,6 +33,7 @@ if (!fs.existsSync(MANUAL_FILE)) {
     _instrucoes: 'Preencha aqui os dados que NAO vem do Sienge. Datas no formato AAAA-MM. Depois rode: npm run build',
     obraNome: 'Reserva - SPE 01',
     orcamentoObra: 83000000,
+    obraRealizada: 21964551,
     retPct: 4.7,
     avancoFisico: [
       { mes: '2025-01', planejado: 5, real: 4 },
@@ -130,9 +131,15 @@ const payablesOk = payables.filter((b) => !anomSet.has(b.id));
 // Custo REAL da obra = titulos a partir do lancamento das vendas (01/08/2023),
 // EXCLUINDO movimentacao de capital (emprestimos/aportes/socios/mutuo) e provisoes (PRV).
 const CAP_RE = /^(104|105|231|222|290|19202|29001|20303|2030304|2030305|2030307|2030216|2270107|2050110|2050111|2050112)/;
-const isCapital = (b) => CAP_RE.test(String(billCategories[b.id] || ''));
+// bill_categories.json: { id: {c: categoria, cc: centroCusto} } (formato novo) ou string (antigo)
+const catOf = (id) => { const e = billCategories[id]; return e && typeof e === 'object' ? String(e.c || '') : String(e || ''); };
+const ccOf = (id) => { const e = billCategories[id]; return e && typeof e === 'object' ? e.cc : null; };
+const isCapital = (b) => CAP_RE.test(catOf(b.id));
 const isProvisao = (b) => (b.documentIdentificationId || '').trim() === 'PRV';
 const noPeriodo = (b) => (b.issueDate || '') >= LANCAMENTO_INICIO;
+// Centros de custo da Reserva: Custos de Obra (direto) = 4,6,20 ; Administrativo de obra = 7,22
+const CC_OBRA = new Set([4, 6, 20]);
+const isObraDireta = (b) => CC_OBRA.has(Number(ccOf(b.id)));
 
 let custoCapital = 0, custoProvisao = 0;
 for (const b of payablesOk) {
@@ -140,18 +147,19 @@ for (const b of payablesOk) {
   if (isProvisao(b)) custoProvisao += v;
   else if (isCapital(b)) custoCapital += v;
 }
-// Titulos de custo real da obra (no periodo, sem capital/provisao)
+// Titulos de custo real (no periodo, sem capital/provisao)
 const payablesReal = payablesOk.filter((b) => noPeriodo(b) && !isProvisao(b) && !isCapital(b));
 const custoReal = payablesReal.reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
-const semCategoria = payablesReal.filter((b) => !billCategories[b.id]).reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
-const classificados = Object.keys(billCategories).length;
+const semCategoria = payablesReal.filter((b) => !catOf(b.id)).reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
+const classificados = Object.values(billCategories).filter((v) => v && typeof v === 'object').length;
 
-// Obra (construcao) x Outros custos do empreendimento, pela categoria de pagamento.
-// Obra = grupos 202 (materiais/servicos), 221 (projetos/licencas), 234 (custo obra).
-const OBRA_RE = /^(202|221|234)/;
-const custoObraReal = payablesReal.filter((b) => OBRA_RE.test(String(billCategories[b.id] || ''))).reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
-const custoOutros = custoReal - custoObraReal; // terreno, pessoal, tributos, comercial, juridico, etc.
-const orcamentoObra = num(manual.orcamentoObra) || 83_000_000; // orcamento de obra (referencia, informado)
+const orcamentoObra = num(manual.orcamentoObra) || 83_000_000; // orcamento de obra (manual; Sienge desatualizado)
+// Obra realizada (pago) = "Total geral / Liquido" do relatorio "Contas Pagas - Obra" do Sienge.
+// E MANUAL porque o Liquido abate antecipacoes (PCT) e substituicoes, que a API nao expoe
+// de forma simples (o centro de custo traz o faturado bruto, bem maior). Atualizar pelo relatorio.
+const custoObraReal = num(manual.obraRealizada) || payablesReal.filter(isObraDireta).reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
+const pctObra = orcamentoObra ? 100 * custoObraReal / orcamentoObra : 0;
+const custoOutros = Math.max(custoReal - custoObraReal, 0); // demais lancamentos reais (indiretos/terreno/comercial)
 
 // Pago x a pagar em aberto (status de pagamento por titulo, bill_paid.json)
 let custoPago = 0, aPagarAberto = 0, paidConhecidos = 0;
@@ -255,7 +263,7 @@ const vgvVendido = vgv + vgvPermuta + vgvMutuo + vgvReservaTec; // comprometido 
 const precoM2Estoque = areaStk.D ? vgvEstoque / areaStk.D : 0;
 const vgvTotal = vgvVendido + vgvEstoque;      // todas as unidades
 const custoSuprARealizar = (typeof supTotalARealizar === 'number' ? supTotalARealizar : 0);
-const pctObra = orcamentoObra ? 100 * custoObraReal / orcamentoObra : 0; // % executado do orcamento
+// pctObra ja calculado acima (obra realizada / orcamento)
 
 // ---- Custo da VIABILIDADE (projecao) = Orcamento da Obra (manual) + Impostos RET ----
 // Orcamento da obra: o do Sienge esta desatualizado -> manual (orcamentoObra, R$83M).
@@ -451,7 +459,9 @@ document.querySelector('[data-tab="viabilidade"]').innerHTML=
  kpi('Custo total',BRL(v.custoProjetado),'orçamento obra + RET')+
  kpi('Resultado projetado',BRL(v.resultado),'VGV − custo',v.resultado>=0?'green':'red')+
  kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV',v.margemPct>=0?'green':'red')+
+ kpi('Obra realizada',PCT(v.pctObra),BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra),'blue')+
  '</div>'+
+ '<div class="chartbox"><h3>Avanço da obra (financeiro)</h3><div style="background:#0f1419;border:1px solid var(--line);border-radius:8px;height:26px;overflow:hidden"><div style="height:100%;width:'+Math.min(v.pctObra,100).toFixed(1)+'%;background:linear-gradient(90deg,#3fb950,#58a6ff);display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-size:12px;font-weight:600">'+PCT(v.pctObra)+'</div></div><div class="sub" style="margin-top:6px;color:var(--mut)">Realizado '+BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra)+' orçado (Contas Pagas - Obra, líquido)</div></div>'+
  '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV × Custo × Resultado','cViabRes')+'</div>'+
  '<div class="row2">'+
  '<div class="chartbox"><h3>Custo total da viabilidade</h3><table><tbody>'+

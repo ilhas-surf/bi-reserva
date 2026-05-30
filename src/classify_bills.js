@@ -21,8 +21,9 @@ const bills = read(path.join(DATA, 'payable_bills.json'), []);
 const cache = read(CACHE_FILE, {});            // { [billId]: "categId" | "" }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const todo = bills.map((b) => b.id).filter((id) => !(id in cache));
-console.log(`Titulos: ${bills.length} | cacheados: ${Object.keys(cache).length} | a buscar: ${todo.length}`);
+// re-busca quem nao esta no cache OU esta no formato antigo (string, sem centro de custo)
+const todo = bills.map((b) => b.id).filter((id) => !(id in cache) || typeof cache[id] !== 'object');
+console.log(`Titulos: ${bills.length} | cacheados (obj): ${Object.values(cache).filter((v) => v && typeof v === 'object').length} | a buscar: ${todo.length}`);
 
 const CONC = 5;
 let done = 0, errors = 0;
@@ -32,14 +33,14 @@ async function fetchCat(id) {
     try {
       const r = await fetch(`${base}/bills/${id}/budget-categories`, { headers: { Authorization: auth, Accept: 'application/json' } });
       if (r.status === 429) { await wait(3000 * (t + 1)); continue; }
-      if (r.status === 404) return '';          // sem apropriacao -> cacheia vazio
+      if (r.status === 404) return { c: '', cc: null };  // sem apropriacao -> cacheia vazio
       if (r.status !== 200) { await wait(500 * (t + 1)); continue; }
       const j = await r.json();
       const rows = j.results || [];
-      // categoria predominante (maior percentage)
-      let best = '', bestPct = -1;
-      for (const a of rows) { const pct = Number(a.percentage) || 0; if (pct > bestPct) { bestPct = pct; best = String(a.paymentCategoriesId || ''); } }
-      return best;
+      // apropriacao predominante (maior percentage): categoria + centro de custo
+      let bestC = '', bestCC = null, bestPct = -1;
+      for (const a of rows) { const pct = Number(a.percentage) || 0; if (pct > bestPct) { bestPct = pct; bestC = String(a.paymentCategoriesId || ''); bestCC = a.costCenterId ?? null; } }
+      return { c: bestC, cc: bestCC };
     } catch { await wait(1000 * (t + 1)); }
   }
   errors++; return ERR;

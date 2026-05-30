@@ -22,7 +22,8 @@ const bills = read('payable_bills.json', []);
 const cat = read('bill_categories.json', {});
 const cache = read('bill_paid.json', {});
 const CAP = /^(104|105|231|222|290|19202|29001|20303|2030304|2030305|2030307|2030216|2270107|2050110|2050111|2050112)/;
-const isCap = (b) => CAP.test(String(cat[b.id] || ''));
+const catOf = (id) => { const e = cat[id]; return e && typeof e === 'object' ? String(e.c || '') : String(e || ''); };
+const isCap = (b) => CAP.test(catOf(b.id));
 const isPrv = (b) => (b.documentIdentificationId || '').trim() === 'PRV';
 
 // so titulos de custo real; pula os ja quitados (congelados)
