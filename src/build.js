@@ -33,6 +33,7 @@ if (!fs.existsSync(MANUAL_FILE)) {
     _instrucoes: 'Preencha aqui os dados que NAO vem do Sienge. Datas no formato AAAA-MM. Depois rode: npm run build',
     obraNome: 'Reserva - SPE 01',
     orcamentoObra: 83000000,
+    obraRealizada: 21964551.30,
     retPct: 4.7,
     avancoFisico: [
       { mes: '2025-01', planejado: 5, real: 4 },
@@ -464,7 +465,7 @@ document.querySelector('[data-tab="viabilidade"]').innerHTML=
  kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV',v.margemPct>=0?'green':'red')+
  kpi('Obra realizada',PCT(v.pctObra),BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra),'blue')+
  '</div>'+
- '<div class="chartbox"><h3>Avanço da obra (financeiro)</h3><div style="background:#0f1419;border:1px solid var(--line);border-radius:8px;height:26px;overflow:hidden"><div style="height:100%;width:'+Math.min(v.pctObra,100).toFixed(1)+'%;background:linear-gradient(90deg,#3fb950,#58a6ff);display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-size:12px;font-weight:600">'+PCT(v.pctObra)+'</div></div><div class="sub" style="margin-top:6px;color:var(--mut)">Realizado '+BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra)+' orçado (pago do plano 2.02, API Sienge)</div></div>'+
+ '<div class="chartbox"><h3>Avanço da obra (financeiro)</h3><div style="background:#0f1419;border:1px solid var(--line);border-radius:8px;height:26px;overflow:hidden"><div style="height:100%;width:'+Math.min(v.pctObra,100).toFixed(1)+'%;background:linear-gradient(90deg,#3fb950,#58a6ff);display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-size:12px;font-weight:600">'+PCT(v.pctObra)+'</div></div><div class="sub" style="margin-top:6px;color:var(--mut)">Realizado '+BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra)+' orçado (Contas Pagas - Obra, plano 2.02, líquido)</div></div>'+
  '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV × Custo × Resultado','cViabRes')+'</div>'+
  '<div class="row2">'+
  '<div class="chartbox"><h3>Custo total da viabilidade</h3><table><tbody>'+
