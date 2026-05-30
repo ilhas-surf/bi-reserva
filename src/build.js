@@ -33,7 +33,6 @@ if (!fs.existsSync(MANUAL_FILE)) {
     _instrucoes: 'Preencha aqui os dados que NAO vem do Sienge. Datas no formato AAAA-MM. Depois rode: npm run build',
     obraNome: 'Reserva - SPE 01',
     orcamentoObra: 83000000,
-    obraRealizada: 21964551,
     retPct: 4.7,
     avancoFisico: [
       { mes: '2025-01', planejado: 5, real: 4 },
@@ -154,20 +153,24 @@ const semCategoria = payablesReal.filter((b) => !catOf(b.id)).reduce((s, b) => s
 const classificados = Object.values(billCategories).filter((v) => v && typeof v === 'object').length;
 
 const orcamentoObra = num(manual.orcamentoObra) || 83_000_000; // orcamento de obra (manual; Sienge desatualizado)
-// Obra realizada (pago) = "Total geral / Liquido" do relatorio "Contas Pagas - Obra" do Sienge.
-// E MANUAL porque o Liquido abate antecipacoes (PCT) e substituicoes, que a API nao expoe
-// de forma simples (o centro de custo traz o faturado bruto, bem maior). Atualizar pelo relatorio.
-const custoObraReal = num(manual.obraRealizada) || payablesReal.filter(isObraDireta).reduce((s, b) => s + num(b.totalInvoiceAmount), 0);
-const pctObra = orcamentoObra ? 100 * custoObraReal / orcamentoObra : 0;
-const custoOutros = Math.max(custoReal - custoObraReal, 0); // demais lancamentos reais (indiretos/terreno/comercial)
 
 // Pago x a pagar em aberto (status de pagamento por titulo, bill_paid.json)
+const PLANO_OBRA = '202'; // plano financeiro 2.02 = Custos e Despesas Gerais (a obra)
 let custoPago = 0, aPagarAberto = 0, paidConhecidos = 0;
+let obraPago = 0, obraAberto = 0; // do plano 2.02 (obra)
 for (const b of payablesReal) {
   const c = billPaid[b.id];
-  if (c) { custoPago += num(c.pago); aPagarAberto += num(c.aberto); paidConhecidos++; }
+  if (!c) continue;
+  custoPago += num(c.pago); aPagarAberto += num(c.aberto); paidConhecidos++;
+  if (catOf(b.id).startsWith(PLANO_OBRA)) { obraPago += num(c.pago); obraAberto += num(c.aberto); }
 }
 const temPaid = Object.keys(billPaid).length > 0;
+
+// Obra realizada = PAGO dos titulos do plano financeiro 2.02 (relatorio "Contas Pagas - Obra").
+// 100% API (parcelas pagas filtradas pelo plano 2.02). Override manual opcional.
+const custoObraReal = num(manual.obraRealizada) || obraPago;
+const pctObra = orcamentoObra ? 100 * custoObraReal / orcamentoObra : 0;
+const custoOutros = Math.max(custoReal - custoObraReal, 0); // demais lancamentos reais (indiretos/terreno/comercial)
 
 // series e fornecedores do custo REAL (nao do capital)
 const custoTotal = custoReal; // compat: custoTotal agora = custo real
@@ -461,7 +464,7 @@ document.querySelector('[data-tab="viabilidade"]').innerHTML=
  kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV',v.margemPct>=0?'green':'red')+
  kpi('Obra realizada',PCT(v.pctObra),BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra),'blue')+
  '</div>'+
- '<div class="chartbox"><h3>Avanço da obra (financeiro)</h3><div style="background:#0f1419;border:1px solid var(--line);border-radius:8px;height:26px;overflow:hidden"><div style="height:100%;width:'+Math.min(v.pctObra,100).toFixed(1)+'%;background:linear-gradient(90deg,#3fb950,#58a6ff);display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-size:12px;font-weight:600">'+PCT(v.pctObra)+'</div></div><div class="sub" style="margin-top:6px;color:var(--mut)">Realizado '+BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra)+' orçado (Contas Pagas - Obra, líquido)</div></div>'+
+ '<div class="chartbox"><h3>Avanço da obra (financeiro)</h3><div style="background:#0f1419;border:1px solid var(--line);border-radius:8px;height:26px;overflow:hidden"><div style="height:100%;width:'+Math.min(v.pctObra,100).toFixed(1)+'%;background:linear-gradient(90deg,#3fb950,#58a6ff);display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-size:12px;font-weight:600">'+PCT(v.pctObra)+'</div></div><div class="sub" style="margin-top:6px;color:var(--mut)">Realizado '+BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra)+' orçado (pago do plano 2.02, API Sienge)</div></div>'+
  '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV × Custo × Resultado','cViabRes')+'</div>'+
  '<div class="row2">'+
  '<div class="chartbox"><h3>Custo total da viabilidade</h3><table><tbody>'+
