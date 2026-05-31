@@ -269,14 +269,23 @@ const vgvTotal = vgvVendido + vgvEstoque;      // todas as unidades
 const custoSuprARealizar = (typeof supTotalARealizar === 'number' ? supTotalARealizar : 0);
 // pctObra ja calculado acima (obra realizada / orcamento)
 
-// ---- Custo da VIABILIDADE (projecao) = Orcamento da Obra (manual) + Impostos RET ----
+// ---- Custo total da VIABILIDADE (informativo) = Orcamento da Obra (manual) + Impostos RET ----
 // Orcamento da obra: o do Sienge esta desatualizado -> manual (orcamentoObra, R$83M).
 // RET: imposto sobre a receita das vendas (Regime Especial de Tributacao), retPct% do VGV.
 const retPct = manual.retPct != null ? num(manual.retPct) : 4.7;
 const impostoRET = vgvTotal * retPct / 100;
-const custoProjetado = orcamentoObra + impostoRET;   // custo total da viabilidade
-const resultado = vgvTotal - custoProjetado;
-const margemPct = vgvTotal ? 100 * resultado / vgvTotal : 0;
+const custoProjetado = orcamentoObra + impostoRET;   // custo total (obra + impostos), indicador
+
+// ---- MARGEM DE RESULTADO (modelo do usuario) ----
+// VGV comercializavel pela SPE = carteira a receber (saldo das parcelas) + estoque a vender.
+// Custo da obra a incorrer = orcamento - obra ja realizada, ABATENDO a permuta a incorrer
+// (terreno pago em unidades de permuta: nao e desembolso de caixa da obra).
+// Margem = VGV comercializavel - custo a incorrer; margem % sobre o VGV comercializavel.
+const vgvComercializavel = aReceber + vgvEstoque;
+const permutaAIncorrer = vgvPermuta;                 // permuta (unidades E) ainda a entregar
+const custoAIncorrer = Math.max(orcamentoObra - custoObraReal - permutaAIncorrer, 0);
+const resultado = vgvComercializavel - custoAIncorrer;
+const margemPct = vgvComercializavel ? 100 * resultado / vgvComercializavel : 0;
 const exposicaoCaixa = custoReal - recRecebido;   // caixa real ja desembolsado menos recebido
 
 // ---------- Series para graficos ----------
@@ -327,7 +336,8 @@ const payload = {
     precoM2Estoque, areaEstoque: areaStk.D,
     orcamentoObra, retPct, impostoRET, custoProjetado,
     custoObraReal, custoOutros, pctObra,
-    resultado, margemPct, exposicaoCaixa,
+    vgvComercializavel, carteiraAReceber: aReceber, permutaAIncorrer, custoAIncorrer,
+    resultado, margemPct, exposicaoCaixa, classificados,
   },
   financeiro: {
     // carteira (vendido) — saldo a receber real (balanceDue das parcelas)
@@ -359,7 +369,9 @@ console.log(`  Custo real (>=${LANCAMENTO_INICIO}, sem capital/provisao): ${paya
 console.log(`    pago ${fmtBRL(custoPago)} | a pagar em aberto ${fmtBRL(aPagarAberto)} | status conhecido p/ ${paidConhecidos}/${payablesReal.length} titulos`);
 console.log(`  Suprimentos: ${contratosSup.length} contratos (${supQtdRescindidos} rescindidos) | contratado ${fmtBRL(supTotalContratado)} · realizado ${fmtBRL(supTotalRealizado)} · a realizar ${fmtBRL(supTotalARealizar)}`);
 console.log(`  Viabilidade: VGV total ${fmtBRL(vgvTotal)} (contratos ${fmtBRL(vgv)} + permuta/mutuo/reserva ${fmtBRL(vgvPermuta + vgvMutuo + vgvReservaTec)} + estoque ${fmtBRL(vgvEstoque)})`);
-console.log(`    Custo total ${fmtBRL(custoProjetado)} = orcamento obra ${fmtBRL(orcamentoObra)} + RET ${retPct}% ${fmtBRL(impostoRET)} | Resultado ${fmtBRL(resultado)} | Margem ${margemPct.toFixed(1)}%`);
+console.log(`    Custo total ${fmtBRL(custoProjetado)} = orcamento obra ${fmtBRL(orcamentoObra)} + RET ${retPct}% ${fmtBRL(impostoRET)}`);
+console.log(`    VGV comercializavel ${fmtBRL(vgvComercializavel)} (a receber ${fmtBRL(aReceber)} + estoque ${fmtBRL(vgvEstoque)}) - custo a incorrer ${fmtBRL(custoAIncorrer)} (obra ${fmtBRL(orcamentoObra - custoObraReal)} - permuta ${fmtBRL(permutaAIncorrer)})`);
+console.log(`    Margem de resultado ${fmtBRL(resultado)} | Margem sobre VGV comerc. ${margemPct.toFixed(1)}%`);
 console.log(`    (execucao real: obra ${fmtBRL(custoObraReal)} de ${fmtBRL(orcamentoObra)} = ${pctObra.toFixed(0)}% | outros ${fmtBRL(custoOutros)})`);
 
 function renderHtml(d) {
@@ -432,10 +444,10 @@ const vg=D.viabilidade, fg=D.financeiro;
 document.querySelector('[data-tab="geral"]').innerHTML=
  '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 10px">Viabilidade</h3>'+
  '<div class="grid">'+
- kpi('VGV total',BRL(vg.vgvTotal),k.unidTotal+' unidades','green')+
- kpi('Custo total',BRL(vg.custoProjetado),'orçamento obra + RET','yel')+
- kpi('Resultado projetado',BRL(vg.resultado),'VGV − custo',vg.resultado>=0?'green':'red')+
- kpi('Margem de resultado',PCT(vg.margemPct),'resultado / VGV',vg.margemPct>=0?'green':'red')+
+ kpi('VGV comercializável',BRL(vg.vgvComercializavel),'a receber + estoque','green')+
+ kpi('Custo a incorrer',BRL(vg.custoAIncorrer),'obra restante − permuta','yel')+
+ kpi('Margem de resultado',BRL(vg.resultado),'VGV comerc. − custo a incorrer',vg.resultado>=0?'green':'red')+
+ kpi('Margem sobre VGV comerc.',PCT(vg.margemPct),'resultado / VGV comerc.',vg.margemPct>=0?'green':'red')+
  '</div>'+
  '<h3 style="color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em;margin:22px 0 10px">Vendas e estoque</h3>'+
  '<div class="grid">'+
@@ -451,29 +463,35 @@ document.querySelector('[data-tab="geral"]').innerHTML=
  (fg.temPaid?kpi('A pagar em aberto',BRL(fg.obraAberto),'saldo a vencer','red'):'')+
  kpi('Suprimentos a realizar',BRL(fg.suprARealizar),'compromisso de obra')+
  '</div>'+
- '<div class="row2">'+box('Receita × Custo por mês','cGeral')+box('VGV × Custo × Resultado','cGeralRes')+'</div>';
+ '<div class="row2">'+box('Receita × Custo por mês','cGeral')+box('VGV comerc. × Custo a incorrer × Margem','cGeralRes')+'</div>';
 
 // VIABILIDADE — tudo da API Sienge
 const v=D.viabilidade;
 document.querySelector('[data-tab="viabilidade"]').innerHTML=
  '<div class="grid">'+
- kpi('VGV total',BRL(v.vgvTotal),'todas as unidades','green')+
- kpi('VGV vendido (comprometido)',BRL(v.vgvVendido),PCT(v.vgvTotal?100*v.vgvVendido/v.vgvTotal:0)+' do VGV','blue')+
+ kpi('VGV comercializável (SPE)',BRL(v.vgvComercializavel),'a receber + estoque','green')+
+ kpi('VGV total',BRL(v.vgvTotal),'incl. permuta/mútuo/RT','blue')+
+ kpi('Carteira a receber',BRL(v.carteiraAReceber),'saldo das parcelas','blue')+
  kpi('VGV estoque (a vender)',BRL(v.vgvEstoque),v.areaEstoque.toFixed(0)+' m² · '+BRL(v.precoM2Estoque)+'/m²','yel')+
- kpi('Custo total',BRL(v.custoProjetado),'orçamento obra + RET')+
- kpi('Resultado projetado',BRL(v.resultado),'VGV − custo',v.resultado>=0?'green':'red')+
- kpi('Margem de resultado',PCT(v.margemPct),'resultado / VGV',v.margemPct>=0?'green':'red')+
+ kpi('Custo total (obra + impostos)',BRL(v.custoProjetado),'orçamento obra + RET')+
+ kpi('Custo a incorrer',BRL(v.custoAIncorrer),'obra restante − permuta a incorrer','yel')+
+ kpi('Margem de resultado',BRL(v.resultado),'VGV comerc. − custo a incorrer',v.resultado>=0?'green':'red')+
+ kpi('Margem sobre VGV comerc.',PCT(v.margemPct),'resultado / VGV comerc.',v.margemPct>=0?'green':'red')+
  kpi('Obra realizada',PCT(v.pctObra),BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra),'blue')+
  '</div>'+
  '<div class="chartbox"><h3>Avanço da obra (financeiro)</h3><div style="background:#0f1419;border:1px solid var(--line);border-radius:8px;height:26px;overflow:hidden"><div style="height:100%;width:'+Math.min(v.pctObra,100).toFixed(1)+'%;background:linear-gradient(90deg,#3fb950,#58a6ff);display:flex;align-items:center;justify-content:flex-end;padding-right:8px;color:#fff;font-size:12px;font-weight:600">'+PCT(v.pctObra)+'</div></div><div class="sub" style="margin-top:6px;color:var(--mut)">Realizado '+BRL(v.custoObraReal)+' de '+BRL(v.orcamentoObra)+' orçado (Contas Pagas - Obra, plano 2.02, líquido)</div></div>'+
- '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV × Custo × Resultado','cViabRes')+'</div>'+
+ '<div class="row2">'+box('Composição do VGV','cViabVgv')+box('VGV comerc. × Custo a incorrer × Margem','cViabRes')+'</div>'+
  '<div class="row2">'+
- '<div class="chartbox"><h3>Custo total da viabilidade</h3><table><tbody>'+
- '<tr><td>Orçamento da obra <span style="color:var(--mut)">(manual)</span></td><td class="r">'+BRL(v.orcamentoObra)+'</td></tr>'+
- '<tr><td>Impostos — RET ('+v.retPct+'% do VGV)</td><td class="r">'+BRL(v.impostoRET)+'</td></tr>'+
- '<tr><td><b>Custo total</b></td><td class="r"><b>'+BRL(v.custoProjetado)+'</b></td></tr>'+
- '<tr><td style="color:var(--mut);padding-top:14px">Execução real da obra (Sienge): '+BRL(v.custoObraReal)+' = '+PCT(v.pctObra)+' do orçado</td><td></td></tr>'+
- '<tr><td style="color:var(--mut)">Outros custos lançados (terreno/comercial/adm): '+BRL(v.custoOutros)+'</td><td></td></tr>'+
+ '<div class="chartbox"><h3>Indicadores de viabilidade</h3><table><tbody>'+
+ '<tr><td>VGV comercializável pela SPE (a receber + estoque)</td><td class="r">'+BRL(v.vgvComercializavel)+'</td></tr>'+
+ '<tr><td>VGV total (incl. permuta/mútuo/RT)</td><td class="r">'+BRL(v.vgvTotal)+'</td></tr>'+
+ '<tr><td>Custo total (obra + impostos)</td><td class="r">'+BRL(v.custoProjetado)+'</td></tr>'+
+ '<tr><td>Custo a incorrer (abatendo a permuta)</td><td class="r">'+BRL(v.custoAIncorrer)+'</td></tr>'+
+ '<tr><td>Carteira a receber</td><td class="r">'+BRL(v.carteiraAReceber)+'</td></tr>'+
+ '<tr><td><b>Margem de resultado (VGV comerc. − custo a incorrer)</b></td><td class="r"><b>'+BRL(v.resultado)+'</b></td></tr>'+
+ '<tr><td><b>Margem sobre VGV comercializável</b></td><td class="r"><b>'+PCT(v.margemPct)+'</b></td></tr>'+
+ '<tr><td style="color:var(--mut);padding-top:14px">Detalhe do custo: orçamento obra '+BRL(v.orcamentoObra)+' + RET '+v.retPct+'% = '+BRL(v.impostoRET)+'</td><td></td></tr>'+
+ '<tr><td style="color:var(--mut)">Obra já realizada: '+BRL(v.custoObraReal)+' = '+PCT(v.pctObra)+' do orçado · permuta a incorrer abatida: '+BRL(v.permutaAIncorrer)+'</td><td></td></tr>'+
  '</tbody></table></div>'+
  '<div class="chartbox"><h3>Composição do VGV por situação</h3><table><tbody>'+
  '<tr><td>Vendido (contratos)</td><td class="r">'+BRL(v.vgvContratos)+'</td></tr>'+
@@ -569,10 +587,10 @@ mk('cVgv',{type:'bar',data:{labels:D.vendas.meses,datasets:[{label:'VGV',data:D.
 mk('cUnid',{type:'doughnut',data:{labels:['Comprometidas','Disponíveis'],datasets:[{data:[k.unidVendidas,k.unidDisponiveis],backgroundColor:['#3fb950','#d29922']}]}});
 mk('cFluxo',{data:{labels:D.fin.meses,datasets:[ds('Entradas',D.fin.receita,'#3fb950'),ds('Saídas',D.fin.custo,'#f85149')]},options:{plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.y)}}}}});
 // Visao geral: VGV x Custo x Resultado
-mk('cGeralRes',{type:'bar',data:{labels:['VGV total','Custo total','Resultado'],datasets:[{data:[vg.vgvTotal,vg.custoProjetado,vg.resultado],backgroundColor:['#58a6ff','#f85149',vg.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
+mk('cGeralRes',{type:'bar',data:{labels:['VGV comercializável','Custo a incorrer','Margem'],datasets:[{data:[vg.vgvComercializavel,vg.custoAIncorrer,vg.resultado],backgroundColor:['#58a6ff','#f85149',vg.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 // Viabilidade
 mk('cViabVgv',{type:'doughnut',data:{labels:['VGV vendido (comprometido)','VGV estoque (a vender)'],datasets:[{data:[v.vgvVendido,v.vgvEstoque],backgroundColor:['#3fb950','#d29922']}]},options:{plugins:{tooltip:{callbacks:{label:c=>c.label+': '+BRL(c.parsed)}}}}});
-mk('cViabRes',{type:'bar',data:{labels:['VGV total','Custo total','Resultado'],datasets:[{data:[v.vgvTotal,v.custoProjetado,v.resultado],backgroundColor:['#58a6ff','#f85149',v.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
+mk('cViabRes',{type:'bar',data:{labels:['VGV comercializável','Custo a incorrer','Margem'],datasets:[{data:[v.vgvComercializavel,v.custoAIncorrer,v.resultado],backgroundColor:['#58a6ff','#f85149',v.resultado>=0?'#3fb950':'#f85149']}]},options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>BRL(c.parsed.y)}}}}});
 // Suprimentos: barras por contrato (top 15 por contratado)
 const supTop=sup.contratos.slice(0,15);
 mk('cSupBar',{type:'bar',data:{labels:supTop.map(c=>c.fornecedor.length>22?c.fornecedor.slice(0,22)+'…':c.fornecedor),datasets:[{label:'Realizado',data:supTop.map(c=>c.realizado),backgroundColor:'#3fb950cc'},{label:'A realizar',data:supTop.map(c=>c.aRealizar),backgroundColor:'#d29922aa'}]},options:{indexAxis:'y',scales:{x:{stacked:true},y:{stacked:true}},plugins:{tooltip:{callbacks:{label:c=>c.dataset.label+': '+BRL(c.parsed.x)}}}}});
